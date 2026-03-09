@@ -289,25 +289,9 @@ def build_customer_table(q: str):
     return customers
 
 
-def _build_forecast_summary(fsq: str = "", fsq_customer: str = ""):
+def _build_forecast_summary(fsq: str = "", fsq_customer: str = "", fs_month: str = ""):
     """
-    Build data for the Forecast Summary tab.
-
-    This version groups rows by (customer, part_number) so that
-    previous-year quantities and current-year quantities for the same
-    part appear on a single row. It also exposes all 12 months
-    (JAN–DEC) for both PREVIOUS FORECAST and FORECAST sections.
-
-    Returned keys:
-      - fs_rows: list of dicts with
-          { customer, part_number, part_name, unit_price, prev, fore }
-        where prev/fore are { "JAN": qty, ... }.
-      - fs_prev_months, fs_fore_months: ordered month labels
-        (always ["JAN", ..., "DEC"]).
-      - fs_total_prev_qty / fs_total_prev_amt: totals per month.
-      - fs_total_fore_qty / fs_total_fore_amt: totals per month.
-      - fs_prev_year, fs_fore_year: year labels for headers.
-      - fs_customers: distinct customer names for filter dropdown.
+    Build data for the Forecast Summary tab with month filtering.
     """
     from datetime import date
     import calendar
@@ -324,9 +308,8 @@ def _build_forecast_summary(fsq: str = "", fsq_customer: str = ""):
 
     today = date.today()
     current_year = today.year
-    prev_year = current_year - 1
 
-    # ── fetch forecasts ──────────────────────────────────────────────────────
+    # fetch forecasts
     qs = (
         Forecast.objects
         .select_related("customer")
@@ -340,8 +323,7 @@ def _build_forecast_summary(fsq: str = "", fsq_customer: str = ""):
     if fsq_customer:
         qs = qs.filter(customer__customer_name=fsq_customer)
 
-    # ── collect all month keys so we can build ordered column lists ──────────
-    prev_month_keys = set()   # (year, month_int, label)
+    # collect all month keys
     fore_month_keys = set()
 
     def _parse_date_str(date_str):
@@ -363,7 +345,7 @@ def _build_forecast_summary(fsq: str = "", fsq_customer: str = ""):
         label = SHORT_MONTHS[month_int]
         return year, month_int, label
 
-    # ── aggregate by (customer, part_number) so prev/fore share one row ─────
+    # aggregate by (customer, part_number)
     rows_by_key = {}
 
     for forecast in qs:
@@ -389,16 +371,13 @@ def _build_forecast_summary(fsq: str = "", fsq_customer: str = ""):
                 "part_number": forecast.part_number,
                 "part_name": forecast.part_name,
                 "unit_price": unit_price,
-                "prev": {},
                 "fore": {},
             }
             rows_by_key[key] = row
         else:
-            # keep latest non-zero unit price
             if unit_price:
                 row["unit_price"] = unit_price
 
-        prev_data = row["prev"]
         fore_data = row["fore"]
 
         for entry in monthly:
@@ -413,43 +392,47 @@ def _build_forecast_summary(fsq: str = "", fsq_customer: str = ""):
             except (TypeError, ValueError):
                 qty = 0.0
 
-            # classify: year before current → previous; current/future → forecast
-            if yr < current_year:
-                prev_data[label] = prev_data.get(label, 0.0) + qty
-                prev_month_keys.add((yr, mo, label))
-            else:
+            # Only include current year
+            if yr == current_year:
                 fore_data[label] = fore_data.get(label, 0.0) + qty
                 fore_month_keys.add((yr, mo, label))
 
     fs_rows = list(rows_by_key.values())
 
-    # ── build ordered month label lists (always full JAN–DEC) ───────────────
-    all_month_labels = [SHORT_MONTHS[i] for i in range(1, 13)]
+    # Filter rows that have data for the selected month
+    if fs_month:
+        filtered_rows = []
+        for row in fs_rows:
+            if row["fore"].get(fs_month, 0) > 0:
+                filtered_rows.append(row)
+        fs_rows = filtered_rows
 
-    # We still evaluate used labels to preserve behaviour if needed later,
-    # but the context always exposes the full 12 months.
-    _ = [lbl for (_, _, lbl) in sorted(prev_month_keys)]
-    _ = [lbl for (_, _, lbl) in sorted(fore_month_keys)]
+    # Determine which months to show - if a month is selected, show only that month
+    if fs_month:
+        fs_fore_months = [fs_month]
+    else:
+        # build ordered month label lists (always full JAN–DEC)
+        fs_fore_months = [SHORT_MONTHS[i] for i in range(1, 13)]
 
-    fs_prev_months = all_month_labels
-    fs_fore_months = all_month_labels
-
-    # ── compute totals ───────────────────────────────────────────────────────
-    fs_total_prev_qty = defaultdict(float)
+    # compute totals - only for the months we're showing
     fs_total_fore_qty = defaultdict(float)
-    fs_total_prev_amt = defaultdict(float)
     fs_total_fore_amt = defaultdict(float)
 
     for row in fs_rows:
         up = row["unit_price"]
-        for lbl, qty in row["prev"].items():
-            fs_total_prev_qty[lbl] += qty
-            fs_total_prev_amt[lbl] += qty * up
-        for lbl, qty in row["fore"].items():
-            fs_total_fore_qty[lbl] += qty
-            fs_total_fore_amt[lbl] += qty * up
+        if fs_month:
+            # If month is selected, only calculate total for that month
+            if fs_month in row["fore"]:
+                qty = row["fore"][fs_month]
+                fs_total_fore_qty[fs_month] += qty
+                fs_total_fore_amt[fs_month] += qty * up
+        else:
+            # Otherwise calculate for all months
+            for lbl, qty in row["fore"].items():
+                fs_total_fore_qty[lbl] += qty
+                fs_total_fore_amt[lbl] += qty * up
 
-    # ── customer list for filter dropdown ───────────────────────────────────
+    # customer list for filter dropdown
     fs_customers = list(
         Forecast.objects.select_related("customer")
         .values_list("customer__customer_name", flat=True)
@@ -459,15 +442,12 @@ def _build_forecast_summary(fsq: str = "", fsq_customer: str = ""):
 
     return {
         "fs_rows":            fs_rows,
-        "fs_prev_months":     fs_prev_months,
         "fs_fore_months":     fs_fore_months,
-        "fs_total_prev_qty":  dict(fs_total_prev_qty),
         "fs_total_fore_qty":  dict(fs_total_fore_qty),
-        "fs_total_prev_amt":  dict(fs_total_prev_amt),
         "fs_total_fore_amt":  dict(fs_total_fore_amt),
-        "fs_prev_year":       prev_year,
         "fs_fore_year":       current_year,
         "fs_customers":       fs_customers,
+        "fs_month":           fs_month,  # Pass back for template
     }
 
 
@@ -1745,9 +1725,10 @@ def admin_dashboard(request):
         except (TypeError, ValueError):
             forecast.quantity_display = 0
 
-    # ── Previous Forecast Tab Data (NEW) ─────────────────────────────────────
+    # ── Previous Forecast Tab Data ─────────────────────────────────────
     pf_customer = (request.GET.get("pf_customer") or "").strip()
     pf_q = (request.GET.get("pf_q") or "").strip()
+    pf_month = (request.GET.get("pf_month") or "").strip()
     
     # Get current and previous years
     from datetime import date
@@ -1856,21 +1837,53 @@ def admin_dashboard(request):
                     # Add to row
                     row["months"][month_abbr] += qty
                     
-                    # Add to totals
-                    total_qty[month_abbr] += qty
-                    total_amt[month_abbr] += qty * unit_price
-                    
                 except (ValueError, IndexError, KeyError):
                     continue
         
         # Convert defaultdict to regular dict for template
         prev_rows = []
         for key, row in rows_by_key.items():
-            row["months"] = dict(row["months"])
-            prev_rows.append(row)
+            # If month filter is applied, create a new months dict with only the selected month
+            if pf_month:
+                if pf_month in row["months"]:
+                    # Create a new row with only the selected month
+                    new_row = {
+                        "customer": row["customer"],
+                        "part_number": row["part_number"],
+                        "part_name": row["part_name"],
+                        "unit_price": row["unit_price"],
+                        "months": {pf_month: row["months"][pf_month]}
+                    }
+                    prev_rows.append(new_row)
+                    
+                    # Update totals for the selected month
+                    total_qty[pf_month] += row["months"][pf_month]
+                    total_amt[pf_month] += row["months"][pf_month] * row["unit_price"]
+            else:
+                # Keep all months
+                new_row = {
+                    "customer": row["customer"],
+                    "part_number": row["part_number"],
+                    "part_name": row["part_name"],
+                    "unit_price": row["unit_price"],
+                    "months": dict(row["months"])
+                }
+                prev_rows.append(new_row)
+                
+                # Update totals for all months
+                for month_abbr, qty in row["months"].items():
+                    total_qty[month_abbr] += qty
+                    total_amt[month_abbr] += qty * row["unit_price"]
         
         # Sort rows by customer then part number
         prev_rows.sort(key=lambda x: (x["customer"], x["part_number"]))
+        
+        # Determine which months to show in the table header
+        if pf_month:
+            fs_prev_months = [pf_month]
+        else:
+            fs_prev_months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 
+                              'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
         
         # Get unique customers for filter dropdown
         prev_customers = list(set(
@@ -1886,21 +1899,23 @@ def admin_dashboard(request):
             "prev_customers": prev_customers,
             "pf_customer": pf_customer,
             "pf_q": pf_q,
-            "fs_prev_months": ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 
-                               'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'],
+            "pf_month": pf_month,
+            "fs_prev_months": fs_prev_months,
             "fs_prev_year": previous_year,
         }
 
-    # ── Forecast Summary tab data ─────────────────────────────────────────────
+        # ── Forecast Summary tab data ─────────────────────────────────────────────
     fsq = (request.GET.get("fsq") or "").strip()
     fsq_customer = (request.GET.get("fsq_customer") or "").strip()
+    fs_month = (request.GET.get("fs_month") or "").strip()  # Add this line
 
     fs_data = {}
     if tab == "forecast_summary":
-        fs_data = _build_forecast_summary(fsq=fsq, fsq_customer=fsq_customer)
+        fs_data = _build_forecast_summary(fsq=fsq, fsq_customer=fsq_customer, fs_month=fs_month)  # Add fs_month parameter
 
     # Actual Delivered tab data
-    adq = (request.GET.get("adq") or "").strip()
+    adq = (request.
+           GET.get("adq") or "").strip()
     ad_customer = (request.GET.get("ad_customer") or "").strip()
 
     ad_data = {}
