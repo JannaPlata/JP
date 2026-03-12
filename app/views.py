@@ -1,5 +1,5 @@
 from django.views.decorators.cache import never_cache
-import json, csv, io, re
+import json, csv, io, re, os, time, gc
 from collections import defaultdict
 from django.views.decorators.http import require_POST
 from django.core.paginator import Paginator
@@ -15,9 +15,17 @@ from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_GET
 from django.utils import timezone
+from paddleocr import PaddleOCR, PPStructureV3
+import pypdfium2 as pdfium
+from django.conf import settings
+import pandas as pd
+import pdfplumber
+import cv2
+import numpy as np
 from .models import (
     Customer,
     TEPCode,
+    BOMMaterial,
     Material,
     MaterialList,
     MaterialStock,
@@ -25,15 +33,12 @@ from .models import (
     ForecastRun,
     ForecastLine,
     Forecast,
+    PartMaster,
+    CustomerPDF,
 )
 
-from .forms import EmployeeCreateForm
-from .service import (
-    ForecastInput,
-    run_forecast_and_save,
-    reserve_from_latest_forecast_run,
-)
-
+# Initialize OCR once (outside the function)
+ocr = PaddleOCR(lang='en')
 
 def is_admin(user):
     return user.is_authenticated and user.is_superuser
@@ -121,6 +126,224 @@ def _ensure_customer_part_entry(customer, part_code, part_name):
     customer.parts = parts
     customer.save(update_fields=["parts"])
     return True, unique_name
+
+
+def _parse_schedule_month_key(value: str) -> str:
+    """Normalize incoming month values to YYYY-MM when possible."""
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+
+    # already YYYY-MM or longer ISO-like format
+    if re.match(r"^\d{4}-\d{2}", raw):
+        return raw[:7]
+
+    month_map = {
+        "jan": 1, "january": 1,
+        "feb": 2, "february": 2,
+        "mar": 3, "march": 3,
+        "apr": 4, "april": 4,
+        "may": 5,
+        "jun": 6, "june": 6,
+        "jul": 7, "july": 7,
+        "aug": 8, "august": 8,
+        "sep": 9, "sept": 9, "september": 9,
+        "oct": 10, "october": 10,
+        "nov": 11, "november": 11,
+        "dec": 12, "december": 12,
+    }
+
+    parts = [s for s in re.split(r"[-/\s]+", raw.lower()) if s]
+    if len(parts) >= 2:
+        month_num = month_map.get(parts[0])
+        year = parts[-1]
+        if month_num and re.fullmatch(r"\d{4}", year):
+            return f"{year}-{month_num:02d}"
+
+    return ""
+
+
+def _build_bom_display_rows(tep):
+    """
+    Prefer shared BOMMaterial rows by part_code.
+    Fallback to legacy Material rows under the current TEP.
+    """
+    rows = []
+    part_code = (getattr(tep, "part_code", "") or "").strip() if tep else ""
+
+    try:
+        bom_rows = (
+            BOMMaterial.objects
+            .filter(part_code=part_code)
+            .select_related("material")
+            .order_by("mat_partcode", "id")
+        )
+    except Exception:
+        bom_rows = BOMMaterial.objects.none()
+
+    if bom_rows.exists():
+        for row in bom_rows:
+            master = getattr(row, "material", None)
+            if master:
+                row.mat_partcode = master.mat_partcode or row.mat_partcode
+                row.mat_partname = master.mat_partname or row.mat_partname
+                row.mat_maker = master.mat_maker or row.mat_maker
+                row.unit = master.unit or row.unit
+            rows.append(row)
+        return rows
+
+    return list(Material.objects.filter(tep_code=tep).order_by("mat_partname", "id"))
+
+def _preferred_tep_for_part_code(part_code: str):
+    """
+    Return the best source TEP for a shared BOM part code.
+    Prefer an active TEP first, then the newest record.
+    """
+    part_code = (part_code or "").strip()
+    if not part_code:
+        return None
+
+    return (
+        TEPCode.objects
+        .filter(part_code=part_code)
+        .order_by("-is_active", "-id")
+        .first()
+    )
+
+def _get_part_name_for_code(part_code: str) -> str:
+    """
+    Resolve the part name from PartMaster first.
+    Fallback to Customer.parts JSON for older data.
+    """
+    part_code = (part_code or "").strip()
+    if not part_code:
+        return ""
+
+    pm = PartMaster.objects.filter(part_code=part_code, is_active=True).first()
+    if pm:
+        return (pm.part_name or "").strip()
+
+    for cust in Customer.objects.all():
+        for item in (cust.parts or []):
+            if not isinstance(item, dict):
+                continue
+            if (item.get("Partcode") or "").strip() == part_code:
+                return (item.get("Partname") or "").strip()
+
+    return ""
+
+
+def get_shared_part_master_map():
+    """
+    Build a mapping of part_code -> part_name.
+
+    Primary source:
+      - PartMaster
+    Fallback source:
+      - legacy Customer.parts JSON
+      - legacy TEPCode.part_code rows
+    """
+    part_map = {}
+
+    # Primary: PartMaster
+    for row in PartMaster.objects.all().order_by("part_code"):
+        code = (row.part_code or "").strip()
+        if code:
+            part_map[code] = (row.part_name or "").strip()
+
+    # Fallback: Customer.parts JSON
+    for cust in Customer.objects.all():
+        for item in (cust.parts or []):
+            if not isinstance(item, dict):
+                continue
+
+            code = (item.get("Partcode") or "").strip()
+            name = (item.get("Partname") or "").strip()
+
+            if code and code not in part_map:
+                part_map[code] = name
+
+    # Final fallback: TEPCode rows
+    for code in TEPCode.objects.values_list("part_code", flat=True):
+        code = (code or "").strip()
+        if code and code not in part_map:
+            part_map[code] = ""
+
+    return part_map
+
+
+def _build_bom_master_context(part_code: str = "", bq: str = ""):
+    """
+    Build the context used by the BOM Master tab/page.
+    Accepts an optional search query for filtering visible part codes.
+    """
+    part_code = (part_code or "").strip()
+    bq = (bq or "").strip().lower()
+
+    part_map = get_shared_part_master_map()
+
+    part_code_options = sorted(
+        code for code, name in part_map.items()
+        if not bq
+        or bq in code.lower()
+        or bq in (name or "").lower()
+    )
+
+    if part_code and part_code not in part_code_options:
+        part_code_options.insert(0, part_code)
+
+    if not part_code and part_code_options:
+        part_code = part_code_options[0]
+
+    source_tep = _preferred_tep_for_part_code(part_code)
+
+    bom_rows = list(
+        BOMMaterial.objects
+        .filter(part_code=part_code)
+        .select_related("material", "source_tep")
+        .order_by("mat_partcode", "id")
+    ) if part_code else []
+
+    part_name = _get_part_name_for_code(part_code) if part_code else ""
+    master_materials = MaterialList.objects.all().order_by("mat_partcode")
+
+    return {
+        "bom_part_code": part_code,
+        "bom_part_name": part_name,
+        "bom_source_tep": source_tep,
+        "bom_rows": bom_rows,
+        "bom_part_code_options": part_code_options,
+        "bom_master_materials": master_materials,
+
+        # compatibility keys for current templates
+        "bom_part_codes": part_code_options,
+        "selected_bom_part_code": part_code,
+        "selected_bom_part_name": part_name,
+        "selected_bom_tep": source_tep,
+        "bq": bq,
+    }
+
+
+def _sync_legacy_material_from_bom(tep, master, dim_qty, loss_percent):
+    """
+    Keep the old Material table in sync for the specific viewed TEP,
+    while the shared BOM itself is stored by part_code.
+    """
+    try:
+        material, _ = Material.objects.update_or_create(
+            tep_code=tep,
+            mat_partcode=master.mat_partcode,
+            defaults={
+                "mat_partname": master.mat_partname,
+                "mat_maker": master.mat_maker,
+                "unit": master.unit,
+                "dim_qty": dim_qty,
+                "loss_percent": loss_percent,
+            },
+        )
+        return material
+    except Exception:
+        return None
 
 
 def _allocate_material_name(tep, base_name: str, exclude_partcode: str = "") -> str:
@@ -255,7 +478,7 @@ def build_customer_table(q: str):
                 {
                     "tep_id": t.id,
                     "tep_code": t.tep_code,
-                    "materials_count": t.materials.count(),
+                    "materials_count": (BOMMaterial.objects.filter(part_code=t.part_code).count() or t.materials.count()),
                     "is_active": getattr(t, "is_active", True),
                 }
                 for t in tep_objs
@@ -289,9 +512,25 @@ def build_customer_table(q: str):
     return customers
 
 
-def _build_forecast_summary(fsq: str = "", fsq_customer: str = "", fs_month: str = ""):
+def _build_forecast_summary(fsq: str = "", fsq_customer: str = ""):
     """
-    Build data for the Forecast Summary tab with month filtering.
+    Build data for the Forecast Summary tab.
+
+    This version groups rows by (customer, part_number) so that
+    previous-year quantities and current-year quantities for the same
+    part appear on a single row. It also exposes all 12 months
+    (JAN–DEC) for both PREVIOUS FORECAST and FORECAST sections.
+
+    Returned keys:
+      - fs_rows: list of dicts with
+          { customer, part_number, part_name, unit_price, prev, fore }
+        where prev/fore are { "JAN": qty, ... }.
+      - fs_prev_months, fs_fore_months: ordered month labels
+        (always ["JAN", ..., "DEC"]).
+      - fs_total_prev_qty / fs_total_prev_amt: totals per month.
+      - fs_total_fore_qty / fs_total_fore_amt: totals per month.
+      - fs_prev_year, fs_fore_year: year labels for headers.
+      - fs_customers: distinct customer names for filter dropdown.
     """
     from datetime import date
     import calendar
@@ -308,8 +547,9 @@ def _build_forecast_summary(fsq: str = "", fsq_customer: str = "", fs_month: str
 
     today = date.today()
     current_year = today.year
+    prev_year = current_year - 1
 
-    # fetch forecasts
+    # ── fetch forecasts ──────────────────────────────────────────────────────
     qs = (
         Forecast.objects
         .select_related("customer")
@@ -323,7 +563,8 @@ def _build_forecast_summary(fsq: str = "", fsq_customer: str = "", fs_month: str
     if fsq_customer:
         qs = qs.filter(customer__customer_name=fsq_customer)
 
-    # collect all month keys
+    # ── collect all month keys so we can build ordered column lists ──────────
+    prev_month_keys = set()   # (year, month_int, label)
     fore_month_keys = set()
 
     def _parse_date_str(date_str):
@@ -345,7 +586,7 @@ def _build_forecast_summary(fsq: str = "", fsq_customer: str = "", fs_month: str
         label = SHORT_MONTHS[month_int]
         return year, month_int, label
 
-    # aggregate by (customer, part_number)
+    # ── aggregate by (customer, part_number) so prev/fore share one row ─────
     rows_by_key = {}
 
     for forecast in qs:
@@ -371,13 +612,16 @@ def _build_forecast_summary(fsq: str = "", fsq_customer: str = "", fs_month: str
                 "part_number": forecast.part_number,
                 "part_name": forecast.part_name,
                 "unit_price": unit_price,
+                "prev": {},
                 "fore": {},
             }
             rows_by_key[key] = row
         else:
+            # keep latest non-zero unit price
             if unit_price:
                 row["unit_price"] = unit_price
 
+        prev_data = row["prev"]
         fore_data = row["fore"]
 
         for entry in monthly:
@@ -392,47 +636,43 @@ def _build_forecast_summary(fsq: str = "", fsq_customer: str = "", fs_month: str
             except (TypeError, ValueError):
                 qty = 0.0
 
-            # Only include current year
-            if yr == current_year:
+            # classify: year before current → previous; current/future → forecast
+            if yr < current_year:
+                prev_data[label] = prev_data.get(label, 0.0) + qty
+                prev_month_keys.add((yr, mo, label))
+            else:
                 fore_data[label] = fore_data.get(label, 0.0) + qty
                 fore_month_keys.add((yr, mo, label))
 
     fs_rows = list(rows_by_key.values())
 
-    # Filter rows that have data for the selected month
-    if fs_month:
-        filtered_rows = []
-        for row in fs_rows:
-            if row["fore"].get(fs_month, 0) > 0:
-                filtered_rows.append(row)
-        fs_rows = filtered_rows
+    # ── build ordered month label lists (always full JAN–DEC) ───────────────
+    all_month_labels = [SHORT_MONTHS[i] for i in range(1, 13)]
 
-    # Determine which months to show - if a month is selected, show only that month
-    if fs_month:
-        fs_fore_months = [fs_month]
-    else:
-        # build ordered month label lists (always full JAN–DEC)
-        fs_fore_months = [SHORT_MONTHS[i] for i in range(1, 13)]
+    # We still evaluate used labels to preserve behaviour if needed later,
+    # but the context always exposes the full 12 months.
+    _ = [lbl for (_, _, lbl) in sorted(prev_month_keys)]
+    _ = [lbl for (_, _, lbl) in sorted(fore_month_keys)]
 
-    # compute totals - only for the months we're showing
+    fs_prev_months = all_month_labels
+    fs_fore_months = all_month_labels
+
+    # ── compute totals ───────────────────────────────────────────────────────
+    fs_total_prev_qty = defaultdict(float)
     fs_total_fore_qty = defaultdict(float)
+    fs_total_prev_amt = defaultdict(float)
     fs_total_fore_amt = defaultdict(float)
 
     for row in fs_rows:
         up = row["unit_price"]
-        if fs_month:
-            # If month is selected, only calculate total for that month
-            if fs_month in row["fore"]:
-                qty = row["fore"][fs_month]
-                fs_total_fore_qty[fs_month] += qty
-                fs_total_fore_amt[fs_month] += qty * up
-        else:
-            # Otherwise calculate for all months
-            for lbl, qty in row["fore"].items():
-                fs_total_fore_qty[lbl] += qty
-                fs_total_fore_amt[lbl] += qty * up
+        for lbl, qty in row["prev"].items():
+            fs_total_prev_qty[lbl] += qty
+            fs_total_prev_amt[lbl] += qty * up
+        for lbl, qty in row["fore"].items():
+            fs_total_fore_qty[lbl] += qty
+            fs_total_fore_amt[lbl] += qty * up
 
-    # customer list for filter dropdown
+    # ── customer list for filter dropdown ───────────────────────────────────
     fs_customers = list(
         Forecast.objects.select_related("customer")
         .values_list("customer__customer_name", flat=True)
@@ -442,12 +682,15 @@ def _build_forecast_summary(fsq: str = "", fsq_customer: str = "", fs_month: str
 
     return {
         "fs_rows":            fs_rows,
+        "fs_prev_months":     fs_prev_months,
         "fs_fore_months":     fs_fore_months,
+        "fs_total_prev_qty":  dict(fs_total_prev_qty),
         "fs_total_fore_qty":  dict(fs_total_fore_qty),
+        "fs_total_prev_amt":  dict(fs_total_prev_amt),
         "fs_total_fore_amt":  dict(fs_total_fore_amt),
+        "fs_prev_year":       prev_year,
         "fs_fore_year":       current_year,
         "fs_customers":       fs_customers,
-        "fs_month":           fs_month,  # Pass back for template
     }
 
 
@@ -869,6 +1112,98 @@ def admin_dashboard(request):
                 messages.error(request, f"Failed to revise TEP: {e}")
                 return redirect(reverse("app:admin_dashboard") + f"?tab=customers&open_panel=1&tep_id={old_tep.id}")
 
+
+        if action == "save_part_master":
+            part_code = _normalize_space(request.POST.get("part_code"))
+            part_name = _normalize_space(request.POST.get("part_name"))
+
+            if not part_code:
+                messages.error(request, "Part code is required.")
+                return redirect(reverse("app:admin_dashboard") + "?tab=bom_master")
+
+            if not part_name:
+                messages.error(request, "Part name is required.")
+                return redirect(reverse("app:admin_dashboard") + "?tab=bom_master")
+
+            try:
+                PartMaster.objects.update_or_create(
+                    part_code=part_code,
+                    defaults={
+                        "part_name": part_name,
+                        "is_active": True,
+                    },
+                )
+                messages.success(request, f"Saved part code: {part_code}")
+                return redirect(reverse("app:admin_dashboard") + f"?tab=bom_master&bpart={part_code}")
+            except Exception as e:
+                messages.error(request, f"Failed to save part code: {e}")
+                return redirect(reverse("app:admin_dashboard") + "?tab=bom_master")
+
+        if action == "save_bom_master":
+            part_code = _normalize_space(request.POST.get("part_code"))
+            source_tep_id = (request.POST.get("source_tep_id") or "").strip()
+            mat_codes = request.POST.getlist("mat_partcode[]") or request.POST.getlist("mat_partcode")
+            dims = request.POST.getlist("dim_qty[]") or request.POST.getlist("dim_qty")
+            losses = request.POST.getlist("loss_percent[]") or request.POST.getlist("loss_percent")
+
+            if not part_code:
+                messages.error(request, "Part code is required.")
+                return redirect(reverse("app:admin_dashboard") + "?tab=bom_master")
+
+            source_tep = None
+            if source_tep_id:
+                source_tep = TEPCode.objects.filter(id=source_tep_id).first()
+            if source_tep is None:
+                source_tep = _preferred_tep_for_part_code(part_code)
+
+            rows = []
+            for i, mat_code in enumerate(mat_codes):
+                mat_code = _normalize_space(mat_code)
+                dim_qty = (dims[i] if i < len(dims) else "").strip()
+                loss_percent = (losses[i] if i < len(losses) else "").strip()
+                if not mat_code and not dim_qty and not loss_percent:
+                    continue
+                rows.append({
+                    "mat_partcode": mat_code,
+                    "dim_qty": dim_qty,
+                    "loss_percent": loss_percent or "10",
+                })
+
+            try:
+                replace_bom_for_partcode(part_code=part_code, rows=rows, source_tep=source_tep)
+                messages.success(request, f"Saved BOM for {part_code}.")
+            except Exception as e:
+                messages.error(request, f"Failed to save BOM: {e}")
+
+            return redirect(reverse("app:admin_dashboard") + f"?tab=bom_master&bpart={part_code}")
+
+        if action == "delete_bom_master":
+            part_code = _normalize_space(request.POST.get("part_code"))
+            if not part_code:
+                messages.error(request, "Missing part code.")
+                return redirect(reverse("app:admin_dashboard") + "?tab=bom_master")
+            deleted = BOMMaterial.objects.filter(part_code=part_code).delete()[0]
+            messages.success(request, f"Deleted {deleted} BOM rows for {part_code}.")
+            return redirect(reverse("app:admin_dashboard") + f"?tab=bom_master&bpart={part_code}")
+
+        if action == "upload_bom_csv":
+            bom_csv_file = request.FILES.get("bom_csv_file")
+
+            try:
+                result = import_bom_csv_file(bom_csv_file, created_by=request.user)
+                messages.success(
+                    request,
+                    f"BOM CSV imported successfully. "
+                    f"Part codes: {result['parts_count']}, "
+                    f"BOM rows: {result['rows_count']}, "
+                    f"new parts: {result['created_parts']}, "
+                    f"new materials: {result['created_materials']}."
+                )
+            except Exception as e:
+                messages.error(request, f"Failed to import BOM CSV: {e}")
+
+            return redirect(reverse("app:admin_dashboard") + "?tab=bom_master")
+
         if action == "add_customer_full":
             customer_name = _normalize_space(request.POST.get("customer_name"))
             part_code = _normalize_space(request.POST.get("part_code"))
@@ -886,12 +1221,23 @@ def admin_dashboard(request):
             if not part_code:
                 messages.error(request, "Partcode is required.")
                 return redirect(reverse("app:admin_dashboard") + "?tab=customers")
-            if not part_name:
-                messages.error(request, "Partname is required.")
-                return redirect(reverse("app:admin_dashboard") + "?tab=customers")
             if not tep_code:
                 messages.error(request, "TEP Code is required.")
                 return redirect(reverse("app:admin_dashboard") + "?tab=customers")
+
+            part_master = (
+                PartMaster.objects
+                .filter(is_active=True)
+                .filter(Q(part_code__iexact=part_code))
+                .first()
+            )
+            if not part_master:
+                messages.error(request, "Please select an existing Part Code from BOM Master.")
+                return redirect(reverse("app:admin_dashboard") + "?tab=customers")
+
+            # Use the canonical PartMaster values
+            part_code = (part_master.part_code or "").strip()
+            part_name = (part_master.part_name or "").strip()
 
             create_material = bool(mat_partcode or dim_qty_raw or loss_raw)
 
@@ -926,7 +1272,7 @@ def admin_dashboard(request):
                     messages.error(request, f"mat_partcode not found in master list: {mat_partcode}")
                     return redirect(reverse("app:admin_dashboard") + "?tab=customers")
 
-                total = round(float(dim_qty) * (1 + (float(loss_percent) / 100.0)), 4)
+                total = round(float(dim_qty) * (1 + (float(loss_percent) / 100.0)), 5)
 
             try:
                 with transaction.atomic():
@@ -943,28 +1289,30 @@ def admin_dashboard(request):
                     )
 
                     if create_material:
-                        final_name = _allocate_material_name(
-                            tep=tep,
-                            base_name=master.mat_partname,
-                            exclude_partcode=mat_partcode
-                        )
-
-                        material, created = Material.objects.get_or_create(
-                            tep_code=tep,
-                            mat_partcode=mat_partcode,
+                        bom_obj, created = BOMMaterial.objects.get_or_create(
+                            part_code=part_code,
+                            mat_partcode=master.mat_partcode,
                             defaults={
-                                "mat_partname": final_name,
+                                "source_tep": tep,
+                                "material": master,
+                                "mat_partname": master.mat_partname,
                                 "mat_maker": master.mat_maker,
                                 "unit": master.unit,
                                 "dim_qty": dim_qty,
                                 "loss_percent": loss_percent,
-                                "total": total,
-                            }
+                            },
                         )
 
                         if not created:
-                            messages.error(request, f"Material already exists for TEP {tep_code} + {mat_partcode}.")
+                            messages.error(request, f"Material already exists for Part Code {part_code} + {mat_partcode}.")
                             return redirect(reverse("app:admin_dashboard") + "?tab=customers")
+
+                        _sync_legacy_material_from_bom(
+                            tep=tep,
+                            master=master,
+                            dim_qty=dim_qty,
+                            loss_percent=loss_percent,
+                        )
 
                 if create_material:
                     messages.success(request, f"Saved: {customer_name} | {part_code} | {tep_code} | {mat_partcode}")
@@ -1631,7 +1979,7 @@ def admin_dashboard(request):
 
     if tep_id and is_ajax:
         tep = get_object_or_404(TEPCode.objects.select_related("customer", "superseded_by"), id=tep_id)
-        materials = Material.objects.filter(tep_code=tep).order_by("mat_partname")
+        materials = _build_bom_display_rows(tep)
 
         selected_part = (tep.part_code or "").strip()
         selected_part_name = ""
@@ -1725,10 +2073,9 @@ def admin_dashboard(request):
         except (TypeError, ValueError):
             forecast.quantity_display = 0
 
-    # ── Previous Forecast Tab Data ─────────────────────────────────────
+    # ── Previous Forecast Tab Data (NEW) ─────────────────────────────────────
     pf_customer = (request.GET.get("pf_customer") or "").strip()
     pf_q = (request.GET.get("pf_q") or "").strip()
-    pf_month = (request.GET.get("pf_month") or "").strip()
     
     # Get current and previous years
     from datetime import date
@@ -1837,53 +2184,21 @@ def admin_dashboard(request):
                     # Add to row
                     row["months"][month_abbr] += qty
                     
+                    # Add to totals
+                    total_qty[month_abbr] += qty
+                    total_amt[month_abbr] += qty * unit_price
+                    
                 except (ValueError, IndexError, KeyError):
                     continue
         
         # Convert defaultdict to regular dict for template
         prev_rows = []
         for key, row in rows_by_key.items():
-            # If month filter is applied, create a new months dict with only the selected month
-            if pf_month:
-                if pf_month in row["months"]:
-                    # Create a new row with only the selected month
-                    new_row = {
-                        "customer": row["customer"],
-                        "part_number": row["part_number"],
-                        "part_name": row["part_name"],
-                        "unit_price": row["unit_price"],
-                        "months": {pf_month: row["months"][pf_month]}
-                    }
-                    prev_rows.append(new_row)
-                    
-                    # Update totals for the selected month
-                    total_qty[pf_month] += row["months"][pf_month]
-                    total_amt[pf_month] += row["months"][pf_month] * row["unit_price"]
-            else:
-                # Keep all months
-                new_row = {
-                    "customer": row["customer"],
-                    "part_number": row["part_number"],
-                    "part_name": row["part_name"],
-                    "unit_price": row["unit_price"],
-                    "months": dict(row["months"])
-                }
-                prev_rows.append(new_row)
-                
-                # Update totals for all months
-                for month_abbr, qty in row["months"].items():
-                    total_qty[month_abbr] += qty
-                    total_amt[month_abbr] += qty * row["unit_price"]
+            row["months"] = dict(row["months"])
+            prev_rows.append(row)
         
         # Sort rows by customer then part number
         prev_rows.sort(key=lambda x: (x["customer"], x["part_number"]))
-        
-        # Determine which months to show in the table header
-        if pf_month:
-            fs_prev_months = [pf_month]
-        else:
-            fs_prev_months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 
-                              'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
         
         # Get unique customers for filter dropdown
         prev_customers = list(set(
@@ -1899,23 +2214,21 @@ def admin_dashboard(request):
             "prev_customers": prev_customers,
             "pf_customer": pf_customer,
             "pf_q": pf_q,
-            "pf_month": pf_month,
-            "fs_prev_months": fs_prev_months,
+            "fs_prev_months": ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 
+                               'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'],
             "fs_prev_year": previous_year,
         }
 
-        # ── Forecast Summary tab data ─────────────────────────────────────────────
+    # ── Forecast Summary tab data ─────────────────────────────────────────────
     fsq = (request.GET.get("fsq") or "").strip()
     fsq_customer = (request.GET.get("fsq_customer") or "").strip()
-    fs_month = (request.GET.get("fs_month") or "").strip()  # Add this line
 
     fs_data = {}
     if tab == "forecast_summary":
-        fs_data = _build_forecast_summary(fsq=fsq, fsq_customer=fsq_customer, fs_month=fs_month)  # Add fs_month parameter
+        fs_data = _build_forecast_summary(fsq=fsq, fsq_customer=fsq_customer)
 
     # Actual Delivered tab data
-    adq = (request.
-           GET.get("adq") or "").strip()
+    adq = (request.GET.get("adq") or "").strip()
     ad_customer = (request.GET.get("ad_customer") or "").strip()
 
     ad_data = {}
@@ -1927,7 +2240,7 @@ def admin_dashboard(request):
 
     if tep_id and is_ajax:
         tep = get_object_or_404(TEPCode.objects.select_related("customer"), id=tep_id)
-        materials = Material.objects.filter(tep_code=tep).order_by("mat_partname")
+        materials = _build_bom_display_rows(tep)
 
         selected_part = (tep.part_code or "").strip()
         selected_part_name = ""
@@ -1947,17 +2260,34 @@ def admin_dashboard(request):
         })
 
     # ── Build final context ───────────────────────────────────────────────────
+    bpart = (request.GET.get("bpart") or "").strip()
+    bq = (request.GET.get("bq") or "").strip()
+    bom_ctx = _build_bom_master_context(bpart, bq)
+
+    part_master_options = list(
+        PartMaster.objects
+        .filter(is_active=True)
+        .order_by("part_code")
+    )
+    part_master_json = {
+        (row.part_code or "").strip(): (row.part_name or "").strip()
+        for row in part_master_options
+        if (row.part_code or "").strip()
+    }
+
     context = {
         "tab": tab,
 
         "customers_count": Customer.objects.count(),
         "tep_count": TEPCode.objects.count(),
-        "materials_count": Material.objects.count(),
+        "materials_count": BOMMaterial.objects.count() if hasattr(BOMMaterial, "objects") else Material.objects.count(),
         "users_count": User.objects.count(),
         "forecasts_count": Forecast.objects.count(),
 
         "customers": customers,
         "q": q,
+        "part_master_options": part_master_options,
+        "part_master_json": json.dumps(part_master_json, ensure_ascii=False),
 
         "mq": mq,
         "material_total": material_total,
@@ -1993,6 +2323,7 @@ def admin_dashboard(request):
         "adq": adq,
         "ad_customer": ad_customer,
         **ad_data,
+        **bom_ctx,
     }
     
     return render(request, "admin/dashboard.html", context)
@@ -2021,6 +2352,29 @@ def toggle_user_active(request, user_id):
 
 @require_GET
 @login_required
+def part_master_lookup(request):
+    part_code = (request.GET.get("part_code") or "").strip()
+    if not part_code:
+        return JsonResponse({"ok": False, "error": "Missing part_code."}, status=400)
+
+    row = (
+        PartMaster.objects
+        .filter(is_active=True)
+        .filter(Q(part_code__iexact=part_code))
+        .first()
+    )
+    if not row:
+        return JsonResponse({"ok": False, "error": "Part code not found."}, status=404)
+
+    return JsonResponse({
+        "ok": True,
+        "part_code": row.part_code,
+        "part_name": row.part_name,
+    })
+
+
+@require_GET
+@login_required
 def material_lookup(request):
     partcode = (request.GET.get("mat_partcode") or "").strip()
     if not partcode:
@@ -2037,6 +2391,92 @@ def material_lookup(request):
         return JsonResponse({"ok": False, "error": "Not found."}, status=404)
 
     return JsonResponse({"ok": True, "material": mat})
+
+@require_GET
+@login_required
+@user_passes_test(is_admin)
+def forecast_qty_lookup(request):
+    part_number = (request.GET.get("part_number") or "").strip()
+    schedule_month = (request.GET.get("schedule_month") or "").strip()
+
+    if not part_number or not schedule_month:
+        return JsonResponse({"ok": False, "quantity": 0})
+
+    month_key = _parse_schedule_month_key(schedule_month)
+    forecasts = Forecast.objects.filter(part_number__iexact=part_number)
+
+    total_qty = 0.0
+
+    for forecast in forecasts:
+        for entry in (forecast.monthly_forecasts or []):
+            if not isinstance(entry, dict):
+                continue
+
+            entry_key = _parse_schedule_month_key(entry.get("date", ""))
+            if month_key and entry_key != month_key:
+                continue
+
+            try:
+                total_qty += float(entry.get("quantity", 0) or 0)
+            except Exception:
+                continue
+
+    try:
+        quantity_value = int(total_qty) if float(total_qty).is_integer() else round(total_qty, 5)
+    except Exception:
+        quantity_value = 0
+
+    return JsonResponse({
+        "ok": True,
+        "quantity": quantity_value,
+    })
+
+
+@require_GET
+@login_required
+def part_bom_lookup(request):
+    part_code = (request.GET.get("part_code") or "").strip()
+    if not part_code:
+        return JsonResponse({"ok": False, "materials": [], "error": "Missing part_code."}, status=400)
+
+    tep, rows = get_registered_materials_for_partcode(part_code)
+    materials = []
+    for row in rows:
+        materials.append({
+            "mat_partcode": row.get("mat_partcode") or "",
+            "mat_partname": row.get("mat_partname") or "",
+            "mat_maker": row.get("mat_maker") or "",
+            "unit": row.get("unit") or "",
+            "dim_qty": row.get("dim_qty") or 0,
+            "loss_percent": row.get("loss_percent") or 0,
+            "total": row.get("total") or row.get("per_unit_total") or 0,
+        })
+
+    return JsonResponse({
+        "ok": True,
+        "part_code": part_code,
+        "tep_id": tep.id if tep else None,
+        "tep_code": tep.tep_code if tep else "",
+        "customer_name": tep.customer.customer_name if tep and tep.customer_id else "",
+        "materials": materials,
+    })
+
+@require_GET
+@login_required
+def bom_part_detail_lookup(request):
+    part_code = (request.GET.get("part_code") or "").strip()
+    if not part_code:
+        return JsonResponse({"ok": False, "message": "Missing part_code."}, status=400)
+
+    tep = _preferred_tep_for_part_code(part_code)
+    return JsonResponse({
+        "ok": True,
+        "part_code": part_code,
+        "part_name": _get_part_name_for_code(part_code),
+        "tep_id": tep.id if tep else None,
+        "tep_code": tep.tep_code if tep else "",
+        "rows": get_shared_bom_rows_for_partcode(part_code),
+    })
 
 
 @login_required
@@ -2591,7 +3031,7 @@ def customer_list(request):
 def customer_detail(request, tep_id: int):
     tep = get_object_or_404(TEPCode.objects.select_related("customer", "superseded_by"), id=tep_id)
 
-    materials = Material.objects.filter(tep_code=tep).order_by("mat_partname")
+    materials = _build_bom_display_rows(tep)
     mq = (request.GET.get("mq") or "").strip()
     master_qs = MaterialList.objects.all().order_by("mat_partcode")
     if mq:
@@ -2671,32 +3111,31 @@ def add_material_to_tep(request):
         messages.error(request, f"mat_partcode not found in master list: {mat_partcode}")
         return redirect(reverse("app:admin_dashboard") + f"?tab=customers&open_panel=1&tep_id={tep_id}")
 
-    total = round(float(dim_qty) * (1 + (float(loss_percent) / 100.0)), 4)
-
     try:
         with transaction.atomic():
-            final_name = _allocate_material_name(
-                tep=tep,
-                base_name=master.mat_partname,
-                exclude_partcode=mat_partcode
-            )
-
-            material, created = Material.objects.get_or_create(
-                tep_code=tep,
-                mat_partcode=mat_partcode,
+            bom_obj, created = BOMMaterial.objects.get_or_create(
+                part_code=tep.part_code,
+                mat_partcode=master.mat_partcode,
                 defaults={
-                    "mat_partname": final_name,
+                    "source_tep": tep,
+                    "material": master,
+                    "mat_partname": master.mat_partname,
                     "mat_maker": master.mat_maker,
                     "unit": master.unit,
                     "dim_qty": dim_qty,
                     "loss_percent": loss_percent,
-                    "total": total,
-                }
+                },
             )
 
             if not created:
-                messages.error(request, f"Material already exists for this TEP + {mat_partcode}.")
+                messages.error(request, f"Material already exists for this Part Code + {mat_partcode}.")
             else:
+                _sync_legacy_material_from_bom(
+                    tep=tep,
+                    master=master,
+                    dim_qty=dim_qty,
+                    loss_percent=loss_percent,
+                )
                 messages.success(request, f"Added material: {mat_partcode}")
 
     except Exception as e:
@@ -2750,32 +3189,31 @@ def add_material_to_tep_staff(request):
         messages.error(request, f"Material code not found in master list: {mat_partcode}")
         return redirect("app:customer_detail", tep_id=tep.id)
 
-    total = round(float(dim_qty) * (1 + (float(loss_percent) / 100.0)), 4)
-
     try:
         with transaction.atomic():
-            final_name = _allocate_material_name(
-                tep=tep,
-                base_name=master.mat_partname,
-                exclude_partcode=mat_partcode
-            )
-
-            material, created = Material.objects.get_or_create(
-                tep_code=tep,
-                mat_partcode=mat_partcode,
+            bom_obj, created = BOMMaterial.objects.get_or_create(
+                part_code=tep.part_code,
+                mat_partcode=master.mat_partcode,
                 defaults={
-                    "mat_partname": final_name,
+                    "source_tep": tep,
+                    "material": master,
+                    "mat_partname": master.mat_partname,
                     "mat_maker": master.mat_maker,
                     "unit": master.unit,
                     "dim_qty": dim_qty,
                     "loss_percent": loss_percent,
-                    "total": total,
-                }
+                },
             )
 
             if not created:
-                messages.error(request, f"Material already exists for this TEP + {mat_partcode}.")
+                messages.error(request, f"Material already exists for this Part Code + {mat_partcode}.")
             else:
+                _sync_legacy_material_from_bom(
+                    tep=tep,
+                    master=master,
+                    dim_qty=dim_qty,
+                    loss_percent=loss_percent,
+                )
                 messages.success(request, f"Added material: {mat_partcode}")
 
     except Exception as e:
@@ -2783,34 +3221,6 @@ def add_material_to_tep_staff(request):
 
     return redirect("app:customer_detail", tep_id=tep.id)
 
-@never_cache
-@login_required
-@user_passes_test(can_edit)  
-def staff_materials(request):
-    mq = (request.GET.get("mq") or "").strip()
-
-    qs = MaterialList.objects.all().order_by("mat_partcode")
-    if mq:
-        qs = qs.filter(
-            Q(mat_partcode__icontains=mq) |
-            Q(mat_partname__icontains=mq) |
-            Q(mat_maker__icontains=mq) |
-            Q(unit__icontains=mq)
-        )
-
-    paginator = Paginator(qs, 12)
-    page = paginator.get_page(request.GET.get("page"))
-
-    return render(request, "materials_list.html", {
-        "mq": mq,
-        "page_obj": page,
-        "materials": page,  
-    })
-
-from django.views.decorators.http import require_POST
-from django.views.decorators.cache import never_cache
-from django.db.models import Q
-from django.core.paginator import Paginator
 
 @never_cache
 @login_required
@@ -3055,6 +3465,7 @@ def customer_create(request):
         return redirect("app:customer_list")
 
 @require_POST
+
 @login_required
 @user_passes_test(is_admin)
 def create_material_allocation(request):
@@ -3124,6 +3535,572 @@ def create_material_allocation(request):
         url += f"&spage={spage}"
     return redirect(url)
 
+def is_text_based_pdf(pdf_path):
+    """
+    Check if PDF contains selectable text (not scanned)
+    Returns True if text-based, False if scanned/image-based
+    """
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            # Check first page for text
+            if len(pdf.pages) > 0:
+                first_page = pdf.pages[0]
+                text = first_page.extract_text()
+                # If we can extract meaningful text (more than just whitespace)
+                if text and len(text.strip()) > 50:  # Arbitrary threshold
+                    return True
+        return False
+    except Exception as e:
+        print(f"Error checking PDF type: {e}")
+        return False  # Default to scanned if we can't determine
+    
+
+def extract_from_text_pdf(pdf_path):
+    """
+    Extract structured data from text-based PDF using pdfplumber
+    """
+    structured_data = {
+        'customer_name': '',
+        'part_code': '',
+        'tep_code': '',
+        'part_name': '',
+        'materials': []
+    }
+    
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            full_text = ""
+            for page in pdf.pages:
+                full_text += page.extract_text() + "\n"
+            
+            # Extract header information using regex
+            lines = full_text.split('\n')
+            
+            # Find customer name
+            for i, line in enumerate(lines):
+                if 'Customer Name:' in line:
+                    if ':' in line:
+                        parts = line.split(':', 1)
+                        if len(parts) > 1 and parts[1].strip():
+                            structured_data['customer_name'] = parts[1].strip()
+                    elif i + 1 < len(lines):
+                        structured_data['customer_name'] = lines[i + 1].strip()
+                    break
+            
+            # Find part code
+            for i, line in enumerate(lines):
+                if 'Part Code:' in line:
+                    if ':' in line:
+                        parts = line.split(':', 1)
+                        if len(parts) > 1 and parts[1].strip():
+                            structured_data['part_code'] = re.sub(r'[✓✔]', '', parts[1]).strip()
+                    elif i + 1 < len(lines):
+                        structured_data['part_code'] = re.sub(r'[✓✔]', '', lines[i + 1]).strip()
+                    break
+            
+            # Find TEP code
+            for i, line in enumerate(lines):
+                if 'TEP Code:' in line:
+                    if ':' in line:
+                        parts = line.split(':', 1)
+                        if len(parts) > 1 and parts[1].strip():
+                            structured_data['tep_code'] = re.sub(r'[✓✔]', '', parts[1]).strip()
+                    elif i + 1 < len(lines):
+                        structured_data['tep_code'] = re.sub(r'[✓✔]', '', lines[i + 1]).strip()
+                    break
+            
+            # Find part name
+            for i, line in enumerate(lines):
+                if 'Part Name:' in line:
+                    if ':' in line:
+                        parts = line.split(':', 1)
+                        if len(parts) > 1 and parts[1].strip():
+                            structured_data['part_name'] = re.sub(r'[✓✔]', '', parts[1]).strip()
+                    elif i + 1 < len(lines):
+                        structured_data['part_name'] = re.sub(r'[✓✔]', '', lines[i + 1]).strip()
+                    break
+            
+            # Extract table using camelot (more accurate for tables)
+            try:
+                import camelot
+                tables = camelot.read_pdf(pdf_path, pages='1', flavor='lattice')
+                
+                if len(tables) > 0:
+                    df = tables[0].df
+                    
+                    # Find the header row
+                    header_row = None
+                    for idx, row in df.iterrows():
+                        row_str = ' '.join(str(val) for val in row.values)
+                        if 'Material Name' in row_str or 'PART CODE' in row_str:
+                            header_row = idx
+                            break
+                    
+                    if header_row is not None:
+                        # Process data rows (after header)
+                        for idx in range(header_row + 1, len(df)):
+                            row = df.iloc[idx]
+                            material_row = {
+                                'name': '',
+                                'part_code': '',
+                                'unit': '',
+                                'maker': '',
+                                'dim_qty': '',
+                                'loss_percent': '',
+                                'total': ''
+                            }
+                            
+                            # Map columns based on position
+                            row_values = [str(val).strip() for val in row.values if str(val).strip()]
+                            
+                            if len(row_values) >= 7:
+                                # Skip Item (index 0)
+                                material_row['name'] = row_values[1] if len(row_values) > 1 else ''
+                                material_row['part_code'] = row_values[2] if len(row_values) > 2 else ''
+                                material_row['unit'] = row_values[3] if len(row_values) > 3 else ''
+                                material_row['maker'] = row_values[4] if len(row_values) > 4 else ''
+                                material_row['dim_qty'] = row_values[5] if len(row_values) > 5 else ''
+                                material_row['loss_percent'] = row_values[6].replace('%', '') if len(row_values) > 6 else ''
+                                material_row['total'] = row_values[7] if len(row_values) > 7 else ''
+                                
+                                if material_row['name'] or material_row['part_code']:
+                                    structured_data['materials'].append(material_row)
+            except Exception as e:
+                print(f"Camelot extraction failed, falling back to pdfplumber: {e}")
+                # Fallback to pdfplumber table extraction
+                for page in pdf.pages:
+                    tables = page.extract_tables()
+                    for table in tables:
+                        if len(table) > 1:  # Has header and data
+                            # Find header row
+                            header_idx = 0
+                            for i, row in enumerate(table):
+                                row_str = ' '.join(str(cell) for cell in row if cell)
+                                if 'Material Name' in row_str or 'PART CODE' in row_str:
+                                    header_idx = i
+                                    break
+                            
+                            # Process data rows
+                            for i in range(header_idx + 1, len(table)):
+                                row = table[i]
+                                if any(cell for cell in row if cell):  # Non-empty row
+                                    material_row = {
+                                        'name': '',
+                                        'part_code': '',
+                                        'unit': '',
+                                        'maker': '',
+                                        'dim_qty': '',
+                                        'loss_percent': '',
+                                        'total': ''
+                                    }
+                                    
+                                    # Clean and map cells
+                                    cells = [str(cell).strip() if cell else '' for cell in row]
+                                    cells = [cell for cell in cells if cell]
+                                    
+                                    if len(cells) >= 6:
+                                        # Skip item number (first cell)
+                                        material_row['name'] = cells[1] if len(cells) > 1 else ''
+                                        material_row['part_code'] = cells[2] if len(cells) > 2 else ''
+                                        material_row['unit'] = cells[3] if len(cells) > 3 else ''
+                                        material_row['maker'] = cells[4] if len(cells) > 4 else ''
+                                        material_row['dim_qty'] = cells[5] if len(cells) > 5 else ''
+                                        material_row['loss_percent'] = cells[6].replace('%', '') if len(cells) > 6 else ''
+                                        material_row['total'] = cells[7] if len(cells) > 7 else ''
+                                        
+                                        if material_row['name'] or material_row['part_code']:
+                                            structured_data['materials'].append(material_row)
+        
+        return structured_data
+        
+    except Exception as e:
+        print(f"Error in text-based extraction: {e}")
+        return structured_data
+                    
+def extract_from_scanned_pdf(pdf_path):
+    """
+    Extract structured data from scanned/image-based PDF using PP-Structure
+    """
+    structured_data = {
+        'customer_name': '',
+        'part_code': '',
+        'tep_code': '',
+        'part_name': '',
+        'materials': []
+    }
+    
+    try:
+        # Initialize PP-Structure
+        table_engine = PPStructureV3(show_log=True)
+        
+        # Convert PDF to images
+        pdf = pdfium.PdfDocument(pdf_path)
+        all_text = []
+        
+        for page_num in range(len(pdf)):
+            # Render page to image
+            page = pdf[page_num]
+            bitmap = page.render(scale=2.0)
+            pil_image = bitmap.to_pil()
+            
+            # Save temporarily
+            temp_img = f"temp_page_{page_num}.jpg"
+            pil_image.save(temp_img, "JPEG")
+            
+            # Run PP-Structure to detect tables
+            result = table_engine(temp_img)
+            
+            # Extract text and tables
+            for res in result:
+                if res['type'] == 'text':
+                    all_text.append(res['res']['text'])
+                elif res['type'] == 'table':
+                    try:
+                        html = res['res']['html']
+                        # Parse HTML table
+                        dfs = pd.read_html(html)
+                        if dfs and len(dfs) > 0:
+                            df = dfs[0]
+                            
+                            # Find header row
+                            header_row = None
+                            for idx, row in df.iterrows():
+                                row_str = ' '.join(str(val).upper() for val in row.values)
+                                if 'MATERIAL NAME' in row_str or 'PART CODE' in row_str:
+                                    header_row = idx
+                                    break
+                            
+                            if header_row is not None:
+                                for idx in range(header_row + 1, len(df)):
+                                    row = df.iloc[idx]
+                                    if any(pd.notna(val) for val in row.values):
+                                        values = [str(val).strip() for val in row.values if pd.notna(val) and str(val).strip()]
+                                        values = [re.sub(r'[✓✔]', '', v).strip() for v in values if v]
+                                        
+                                        if len(values) >= 5:
+                                            material_row = {
+                                                'name': '',
+                                                'part_code': '',
+                                                'unit': '',
+                                                'maker': '',
+                                                'dim_qty': '',
+                                                'loss_percent': '',
+                                                'total': ''
+                                            }
+                                            
+                                            start_idx = 1 if values and values[0].isdigit() else 0
+                                            if start_idx < len(values):
+                                                material_row['name'] = values[start_idx]
+                                            if start_idx + 1 < len(values):
+                                                material_row['part_code'] = values[start_idx + 1]
+                                            if start_idx + 2 < len(values) and values[start_idx + 2] in ['m', 'pc', 'pcs', 'kg', 'g']:
+                                                material_row['unit'] = values[start_idx + 2]
+                                            if start_idx + 3 < len(values):
+                                                material_row['maker'] = values[start_idx + 3]
+                                            if start_idx + 4 < len(values):
+                                                material_row['dim_qty'] = values[start_idx + 4]
+                                            if start_idx + 5 < len(values):
+                                                material_row['loss_percent'] = values[start_idx + 5].replace('%', '')
+                                            if start_idx + 6 < len(values):
+                                                material_row['total'] = values[start_idx + 6]
+                                            
+                                            if material_row['name'] or material_row['part_code']:
+                                                structured_data['materials'].append(material_row)
+                    except Exception as e:
+                        print(f"Error parsing table: {e}")
+                        continue
+            
+            # Clean up temp image
+            if os.path.exists(temp_img):
+                os.remove(temp_img)
+        
+        pdf.close()
+        
+        # Extract header info from all text
+        full_text = ' '.join(all_text)
+        
+        # Customer name
+        import re
+        customer_match = re.search(r'Customer Name:\s*([^\n]+)', full_text, re.IGNORECASE)
+        if customer_match:
+            structured_data['customer_name'] = customer_match.group(1).strip()
+        
+        # Part code
+        part_match = re.search(r'Part Code:\s*([^\n]+)', full_text, re.IGNORECASE)
+        if part_match:
+            structured_data['part_code'] = re.sub(r'[✓✔]', '', part_match.group(1)).strip()
+        
+        # TEP code
+        tep_match = re.search(r'TEP Code:\s*([^\n]+)', full_text, re.IGNORECASE)
+        if tep_match:
+            structured_data['tep_code'] = re.sub(r'[✓✔]', '', tep_match.group(1)).strip()
+        
+        # Part name
+        name_match = re.search(r'Part Name:\s*([^\n]+)', full_text, re.IGNORECASE)
+        if name_match:
+            structured_data['part_name'] = re.sub(r'[✓✔]', '', name_match.group(1)).strip()
+        
+        return structured_data
+        
+    except Exception as e:
+        print(f"Error in scanned PDF extraction: {e}")
+        import traceback
+        traceback.print_exc()
+        return structured_data
+                    
+def extract_structured_data_from_pdf(pdf_path):
+    """
+    Main extraction function that determines PDF type and calls appropriate extractor
+    """
+    # Step 1: Check if PDF has selectable text
+    is_text_based = is_text_based_pdf(pdf_path)
+    
+    # Step 2: Extract data based on PDF type
+    if is_text_based:
+        print("📄 Text-based PDF detected - using pdfplumber/camelot")
+        structured_data = extract_from_text_pdf(pdf_path)
+        extraction_method = "text-based"
+    else:
+        print("📄 Scanned PDF detected - using PP-Structure OCR")
+        structured_data = extract_from_scanned_pdf(pdf_path)
+        extraction_method = "scanned (OCR)"
+    
+    print(f"✅ Extraction complete using {extraction_method}")
+    return extraction_method, structured_data
+
+@require_POST
+@login_required
+@user_passes_test(is_admin)
+def upload_customer_pdf(request):
+    if request.method == 'POST' and request.FILES.get('pdf_file'):
+        pdf_file = request.FILES['pdf_file']
+        description = request.POST.get('description', '')
+        
+        # Validate file type
+        if not pdf_file.name.endswith('.pdf'):
+            messages.error(request, 'Only PDF files are allowed.')
+            return redirect('app:admin_dashboard')
+        
+        # Validate file size (20MB limit for PDFs)
+        if pdf_file.size > 20 * 1024 * 1024:
+            messages.error(request, 'File size must be less than 20MB.')
+            return redirect('app:admin_dashboard')
+        
+        try:
+            # Save PDF temporarily
+            temp_dir = os.path.join(settings.MEDIA_ROOT, 'temp_pdfs')
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            temp_path = os.path.join(temp_dir, pdf_file.name)
+            with open(temp_path, 'wb+') as f:
+                for chunk in pdf_file.chunks():
+                    f.write(chunk)
+            
+            # Extract text and structured data from PDF
+            extraction_method, structured_data = extract_structured_data_from_pdf(temp_path)
+
+            # DEBUG: See what was extracted
+            print("\n" + "="*60)
+            print(f"🔍 EXTRACTION RESULTS ({extraction_method})")
+            print("="*60)
+            print(f"Customer Name: '{structured_data.get('customer_name', '')}'")
+            print(f"Part Code: '{structured_data.get('part_code', '')}'")
+            print(f"TEP Code: '{structured_data.get('tep_code', '')}'")
+            print(f"Part Name: '{structured_data.get('part_name', '')}'")
+            print(f"Materials Found: {len(structured_data.get('materials', []))}")
+
+            # Create/Update Customer, TEP, and Materials based on extracted data
+            customer = None
+            tep = None
+            materials_created = 0
+            materials_skipped = 0
+            materials_added_to_master = 0
+            
+            if structured_data.get('customer_name') and structured_data.get('part_code') and structured_data.get('tep_code'):
+                try:
+                    with transaction.atomic():
+                        # STEP 1: Create or get customer
+                        customer, customer_created = Customer.objects.get_or_create(
+                            customer_name=structured_data['customer_name']
+                        )
+                        print(f"✓ Customer: {customer.customer_name} (created: {customer_created})")
+                        
+                        # STEP 2: Add part to customer's parts if not exists
+                        part_added, part_name_used = _ensure_customer_part_entry(
+                            customer, 
+                            structured_data['part_code'], 
+                            structured_data['part_name'] or structured_data['part_code']
+                        )
+                        print(f"✓ Part: {structured_data['part_code']} - {part_name_used}")
+                        
+                        # STEP 3: Check if TEP already exists
+                        existing_tep = TEPCode.objects.filter(
+                            tep_code=structured_data['tep_code']
+                        ).first()
+
+                        if existing_tep:
+                            tep = existing_tep
+                            print(f"✓ TEP: {tep.tep_code} already exists")
+                        else:
+                            tep, tep_created = TEPCode.objects.get_or_create(
+                                customer=customer,
+                                part_code=structured_data['part_code'],
+                                tep_code=structured_data['tep_code'],
+                                defaults={'is_active': True}
+                            )
+                            print(f"✓ Created new TEP: {tep.tep_code}")
+                        
+                        # STEP 4: Process materials if found
+                        if structured_data.get('materials'):
+                            print(f"\n📦 Processing {len(structured_data['materials'])} materials...")
+                            for idx, material_data in enumerate(structured_data['materials']):
+                                print(f"\n  Material #{idx+1}:")
+                                print(f"    Name: {material_data.get('name', '')}")
+                                print(f"    Part Code: {material_data.get('part_code', '')}")
+                                print(f"    Unit: {material_data.get('unit', '')}")
+                                print(f"    Maker: {material_data.get('maker', '')}")
+                                print(f"    Dim/Qty: {material_data.get('dim_qty', '')}")
+                                print(f"    Loss %: {material_data.get('loss_percent', '')}")
+                                print(f"    Total: {material_data.get('total', '')}")
+                                
+                                try:
+                                    material_partcode = material_data.get('part_code', '').strip()
+                                    
+                                    if material_partcode:
+                                        print(f"  Looking for material with code: '{material_partcode}'")
+                                        
+                                        # Try to find the material in MaterialList
+                                        material_list = None
+                                        
+                                        # Try exact match first
+                                        material_list = MaterialList.objects.filter(
+                                            mat_partcode__iexact=material_partcode
+                                        ).first()
+                                        
+                                        # If not found, try contains
+                                        if not material_list:
+                                            clean_code = re.sub(r'[^A-Za-z0-9-]', '', material_partcode)
+                                            material_list = MaterialList.objects.filter(
+                                                mat_partcode__icontains=clean_code
+                                            ).first()
+                                        
+                                        # If STILL not found, CREATE the material
+                                        if not material_list:
+                                            print(f"  ⚠️ Material not found. Creating new material entry...")
+                                            
+                                            material_name = material_data.get('name', '').strip() or material_partcode
+                                            maker = material_data.get('maker', '').strip() or "Unknown"
+                                            unit = material_data.get('unit', '').strip() or "pc"
+                                            
+                                            material_list = MaterialList.objects.create(
+                                                mat_partcode=material_partcode,
+                                                mat_partname=material_name,
+                                                mat_maker=maker,
+                                                unit=unit
+                                            )
+                                            materials_added_to_master += 1
+                                            print(f"  ✅ Created new material in master list: {material_list.mat_partcode}")
+                                        
+                                        print(f"  ✅ Using material: {material_list.mat_partcode} - {material_list.mat_partname}")
+                                        
+                                        # Get dim_qty and loss_percent
+                                        try:
+                                            dim_qty = float(material_data.get('dim_qty', 0) or 0)
+                                        except (ValueError, TypeError):
+                                            dim_qty = 0.0
+                                        
+                                        try:
+                                            loss_percent = float(material_data.get('loss_percent', 10) or 10)
+                                        except (ValueError, TypeError):
+                                            loss_percent = 10.0
+                                        
+                                        # Check if BOMMaterial already exists
+                                        existing_bom = BOMMaterial.objects.filter(
+                                            part_code=structured_data['part_code'],
+                                            mat_partcode=material_list.mat_partcode
+                                        ).first()
+                                        
+                                        if existing_bom:
+                                            materials_skipped += 1
+                                            print(f"  ⏭️ Material already exists in BOM: {material_list.mat_partcode}")
+                                        else:
+                                            # Create new BOMMaterial
+                                            bom = BOMMaterial.objects.create(
+                                                part_code=structured_data['part_code'],
+                                                mat_partcode=material_list.mat_partcode,
+                                                source_tep=tep,
+                                                material=material_list,
+                                                mat_partname=material_list.mat_partname,
+                                                mat_maker=material_list.mat_maker,
+                                                unit=material_list.unit,
+                                                dim_qty=dim_qty,
+                                                loss_percent=loss_percent,
+                                            )
+                                            materials_created += 1
+                                            print(f"  ✅ Added material to BOM: {material_list.mat_partcode}")
+                                            
+                                    else:
+                                        materials_skipped += 1
+                                        print(f"  ⚠️ No part code found for material")
+                                        
+                                except Exception as e:
+                                    materials_skipped += 1
+                                    print(f"  ❌ Error processing material: {str(e)}")
+                                    import traceback
+                                    traceback.print_exc()
+                                    continue
+                        else:
+                            print("📦 No materials found in PDF")
+                        
+                        customer_name_display = customer.customer_name
+                        success_msg = f'✅ PDF processed for {customer_name_display}. '
+                        success_msg += f'Method: {extraction_method}. '
+                        success_msg += f'TEP: {tep.tep_code}. '
+                        if materials_added_to_master > 0:
+                            success_msg += f'Added {materials_added_to_master} new materials to master list. '
+                        success_msg += f'Added {materials_created} materials to BOM'
+                        if materials_skipped > 0:
+                            success_msg += f' (skipped {materials_skipped})'
+                            
+                except Exception as e:
+                    success_msg = f'⚠️ PDF uploaded but failed to create records: {str(e)}'
+                    customer_name_display = structured_data.get('customer_name', 'Unknown')
+                    print(f"❌ ERROR: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    
+            else:
+                success_msg = f'⚠️ PDF uploaded but could not extract complete customer/part/TEP information.'
+                customer_name_display = "General Document"
+            
+            # Create PDF record
+            try:
+                pdf_doc = CustomerPDF.objects.create(
+                    customer=customer if 'customer' in locals() else None,
+                    pdf_file=pdf_file,
+                    extracted_text=str(structured_data),
+                    description=description,
+                    uploaded_by=request.user
+                )
+            except:
+                pass
+            
+            # Clean up temp file
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                    print(f"✅ Temp file deleted: {temp_path}")
+                except:
+                    pass
+            
+            messages.success(request, success_msg)
+            
+        except Exception as e:
+            messages.error(request, f'Error: {str(e)}')
+            import traceback
+            traceback.print_exc()
+    
+    return redirect('app:admin_dashboard')
 
 
 def logout_view(request):
@@ -3147,3 +4124,174 @@ def reserve_material(request):
     record (status='reserved') after checking availability.
     """
     return create_material_allocation(request)
+
+
+    
+def extract_material_partcode(material_line):
+    """Extract material part code from a line of text"""
+    import re
+    
+    # Print the line we're trying to parse for debugging
+    print(f"  🔍 Parsing material line: {material_line}")
+    
+    # Clean the line first - remove checkmarks and special characters
+    clean_line = re.sub(r'[✓✔]', '', material_line)
+    
+    # Special handling for known materials in your database
+    known_codes = {
+        'UL3826': 'UL3826 AWG26 WHITE',
+        '50212-8000': '50212-8000',
+        'SYM-001T': 'SYM-001T-P0.6',
+        'T5003T0B-2': 'T5003T0B-2',
+        'T5003TOB-2': 'T5003T0B-2',
+        '51090-0200': '51090-0200 WHITE'
+    }
+    
+    for key, value in known_codes.items():
+        if key in clean_line:
+            print(f"  ✅ Found known part code: {value}")
+            return value
+    
+    # Common material part code patterns
+    patterns = [
+        r'(UL\s*\d{4}\s*AWG\s*\d+\s*\w+)',
+        r'(\d{5,}-\d{4})',
+        r'(SYM[- ]?\d+[A-Z]*)',
+        r'(T\d{4}T[O0]B[- ]?\d)',
+        r'(\d{5,}-\d{4}\s*\w+)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, clean_line, re.IGNORECASE)
+        if match:
+            extracted = match.group(1).strip()
+            print(f"  ✅ Extracted part code: {extracted}")
+            return extracted
+    
+    print(f"  ❌ No part code found in: {material_line}")
+    return None
+
+
+def extract_material_name(material_line):
+    """Extract material name from a line of text"""
+    import re
+    
+    # Clean the line
+    clean_line = re.sub(r'[✓✔]', '', material_line)
+    
+    # Known material names
+    material_names = ['WIRE', 'TERMINAL', 'HOUSING', 'SWITCH', 'TUBE', 'SOLDER']
+    
+    for name in material_names:
+        if name in clean_line.upper():
+            # For TERMINAL, try to get the full description
+            if name == 'TERMINAL':
+                terminal_match = re.search(r'(TERMINAL\s*\d*\s*\(?[^)]*\)?)', clean_line, re.IGNORECASE)
+                if terminal_match:
+                    return terminal_match.group(1).strip()
+            return name
+    
+    # If no common name found, try to get the first meaningful word
+    words = clean_line.split()
+    for word in words:
+        if len(word) > 2 and not word.replace('.', '').isdigit():
+            return word
+    
+    return "Material"
+
+
+def extract_maker(material_line):
+    """Extract maker from a line of text"""
+    import re
+    
+    # Clean the line
+    clean_line = re.sub(r'[✓✔]', '', material_line)
+    
+    # Common makers
+    makers = ['SUMITOMO', 'MOLEX', 'JST', 'JWT', 'JSWT', 'SOLDER COAT', 'SHINMEI']
+    
+    for maker in makers:
+        if maker in clean_line.upper():
+            print(f"  ✅ Found maker: {maker}")
+            return maker
+    
+    # If not found, try to find an all-caps word that might be a maker
+    words = clean_line.split()
+    for word in words:
+        if word.isupper() and len(word) > 2 and not re.search(r'\d', word):
+            if word not in ['WIRE', 'TERMINAL', 'HOUSING', 'SWITCH', 'TUBE', 'SOLDER']:
+                print(f"  ✅ Found potential maker: {word}")
+                return word
+    
+    return "Unknown"
+
+
+def extract_unit(material_line):
+    """Extract unit from a line of text"""
+    import re
+    
+    clean_line = material_line.lower()
+    
+    # Common units
+    units = ['m', 'pc', 'pcs', 'kg', 'g']
+    
+    for unit in units:
+        if re.search(r'\b' + unit + r'\b', clean_line):
+            print(f"  ✅ Found unit: {unit}")
+            return unit
+    
+    # Check for common patterns
+    if 'pcs' in clean_line:
+        return 'pcs'
+    if 'pc' in clean_line:
+        return 'pc'
+    if 'm' in clean_line and not re.search(r'\d+m', clean_line):
+        return 'm'
+    
+    return "pc"  # default
+
+
+def extract_material_numbers(material_line):
+    """Extract dim_qty and loss_percent from material line"""
+    import re
+    
+    # Default values
+    dim_qty = 0.0
+    loss_percent = 10.0  # Default 10%
+    
+    # Clean the line
+    clean_line = re.sub(r'[✓✔]', '', material_line)
+    
+    # Find all numbers (including decimals)
+    numbers = re.findall(r'\b\d+\.?\d*\b', clean_line)
+    
+    if numbers:
+        float_numbers = [float(num) for num in numbers]
+        
+        # Look for dim_qty (usually the smallest number that's not 1-4 at the beginning)
+        for num in float_numbers:
+            # Skip if it looks like an item number (1,2,3,4) at the beginning
+            if num <= 4 and re.match(r'^\s*\d+\s', clean_line):
+                continue
+            # Skip years
+            if 2000 <= num <= 2100:
+                continue
+            # This is likely dim_qty
+            if num <= 10 or (0 < num < 1):
+                dim_qty = num
+                break
+        
+        # If still not found, take the first number that's not a year
+        if dim_qty == 0.0 and float_numbers:
+            for num in float_numbers:
+                if not (2000 <= num <= 2100):
+                    dim_qty = num
+                    break
+    
+    # Look for percentage (e.g., "10%")
+    percent_match = re.search(r'(\d+)%', material_line)
+    if percent_match:
+        loss_percent = float(percent_match.group(1))
+    
+    print(f"  📊 Extracted dim_qty: {dim_qty}, loss_percent: {loss_percent}")
+    return dim_qty, loss_percent

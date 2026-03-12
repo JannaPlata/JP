@@ -29,11 +29,9 @@
     .sidebar {
       width: 72px;
       transition: width 180ms ease;
-      z-index: 50;
     }
     .sidebar:hover {
       width: 260px;
-      box-shadow: 4px 0 18px rgba(0,0,0,0.35);
     }
     .main-wrap {
       margin-left: 72px;
@@ -42,24 +40,6 @@
       transition: margin-left 180ms ease, width 180ms ease;
       overflow-x: hidden;
     }
-
-    .main-wrap > div:first-child { 
-      padding-left: 0; 
-    }
-    .sidebar:hover ~ .main-wrap {
-      margin-left: 260px;
-      width: calc(100% - 260px);
-    }
-
-  /* For tables that need extra care with horizontal scroll */
-  .overflow-x-auto,
-  .fs-table-wrap,
-  [class*="overflow-x"] {
-    position: relative;
-    z-index: 1;
-  }
-
-/* Remove the hover selector that pushes content */
     .sidebar:hover ~ .main-wrap {
       margin-left: 260px;
       width: calc(100% - 260px);
@@ -200,7 +180,7 @@
     .fs-table {
       border-collapse: collapse;
       width: 100%;
-      min-width: 100%;
+      min-width: 1400px;
       font-size: 0.75rem;
       font-family: 'Courier New', monospace;
     }
@@ -349,14 +329,6 @@
       min-width: 100%;
     }
 
-    .max-w-7xl {
-    max-width: 1280px;
-    width: 100%;
-    margin-left: auto;
-    margin-right: auto;
-  }
-
-
   </style>
 </head>
 
@@ -392,6 +364,21 @@
           <div class="nav-text">
             <div class="font-medium">Customer Records</div>
             <div class="text-xs text-slate-200/80">View, Add, Insert Materials</div>
+          </div>
+        </a>
+
+        <a href="?tab=bom_master&bq={{ bq|urlencode }}{% if selected_bom_part_code %}&bpart={{ selected_bom_part_code|urlencode }}{% endif %}"
+           class="flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-white/5 transition
+                  {% if tab == 'bom_master' %}bg-white/10{% endif %}">
+          <span class="inline-flex h-9 w-9 rounded-lg bg-white/5 items-center justify-center border border-white/10">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M4 7h16M4 12h16M4 17h10" />
+            </svg>
+          </span>
+          <div class="nav-text">
+            <div class="font-medium">BOM Master</div>
+            <div class="text-xs text-slate-200/80">Register shared recipe per part code</div>
           </div>
         </a>
 
@@ -562,14 +549,17 @@
   </aside>
 
   <div class="main-wrap">
+
     <div class="topbar-gradient text-slate-100">
-    <div class="max-w-7xl mx-auto p-6 space-y-6">
+      <div class="max-w-7xl mx-auto p-6 space-y-6">
+
         <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
             <h1 class="text-2xl font-bold text-blue-300">Admin Dashboard</h1>
             <p class="text-sm text-slate-200/80">Overview + quick access</p>
           </div>
         </div>
+
         <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
           <div class="bg-white/5 border border-white/10 rounded-xl p-4">
             <div class="text-sm text-slate-200/80">Customers</div>
@@ -593,7 +583,7 @@
     </div>
 
     <div class="bg-white w-full">
-  <div class="max-w-7xl mx-auto p-6 space-y-6 w-full">
+      <div class="max-w-7xl mx-auto p-6 space-y-6 w-full">
 
         {% if messages %}
           <div id="flash-messages" class="space-y-2">
@@ -611,6 +601,7 @@
             {% endfor %}
           </div>
         {% endif %}
+
         {% if tab == "customers" %}
 
 <div class="w-full">
@@ -647,6 +638,18 @@
           onclick="openCustomerModal()"
           class="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white transition">
           Add Customer
+        </button>
+
+        <!-- NEW: Upload PDF Button -->
+        <button
+          type="button"
+          onclick="openPDFUploadModal()"
+          class="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white transition flex items-center gap-2">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 11v6m-3-3h6" />
+          </svg>
+          Upload PDF
         </button>
 
       </form>
@@ -780,7 +783,7 @@
 <div id="customerModal"
      class="fixed inset-0 bg-black bg-opacity-40 hidden items-center justify-center z-50">
   <div class="bg-white w-[600px] h-[500px] rounded-lg shadow-lg flex flex-col overflow-x-hidden">
-
+ 
     <!-- HEADER -->
     <div class="flex justify-between items-center p-4 border-b">
       <h3 class="text-lg font-semibold">Add Customer</h3>
@@ -826,12 +829,39 @@
           <!-- STEP 2 -->
           <div class="step hidden" id="step2">
             <h4 class="text-lg font-semibold mb-4">Step 2: Part Info</h4>
-            <input type="text" name="part_code" placeholder="Part Code"
-                   class="w-full border p-2 mb-3 rounded"
-                   oninput="updateSummary(); validateStep()" required>
-            <input type="text" name="part_name" placeholder="Part Name"
-                   class="w-full border p-2 mb-3 rounded"
-                   oninput="updateSummary(); validateStep()" required>
+
+            <input
+              type="text"
+              name="part_code"
+              id="customerPartCode"
+              list="customerPartCodeList"
+              placeholder="Type or select existing Part Code"
+              class="w-full border p-2 mb-3 rounded"
+              oninput="syncPartMasterSelection(); updateSummary(); validateStep()"
+              onchange="syncPartMasterSelection(); updateSummary(); validateStep()"
+              autocomplete="off"
+              required
+            >
+
+            <datalist id="customerPartCodeList">
+              {% for part in part_master_options %}
+                <option value="{{ part.part_code }}" data-part-name="{{ part.part_name|escape }}">
+                  {{ part.part_code }} - {{ part.part_name }}
+                </option>
+              {% endfor %}
+              {% for part in shared_part_master_items %}
+                <option value="{{ part.part_code }}" data-part-name="{{ part.part_name|escape }}">
+                  {{ part.part_code }} - {{ part.part_name }}
+                </option>
+              {% endfor %}
+            </datalist>
+
+            <input type="text" name="part_name" id="customerPartName" placeholder="Part Name"
+                   class="w-full border p-2 mb-3 rounded bg-slate-100"
+                   readonly required>
+            <div id="customerPartCodeHint" class="text-xs text-slate-500 -mt-1 mb-2">
+              Type a part code and pick from the suggestions. Part codes are maintained in BOM Master.
+            </div>
           </div>
 
           <!-- STEP 3 -->
@@ -866,7 +896,74 @@
   </div>
 </div>
 
+<!-- PDF UPLOAD MODAL -->
+<div id="pdfUploadModal"
+     class="fixed inset-0 bg-black bg-opacity-40 hidden items-center justify-center z-50">
+  <div class="bg-white w-[500px] rounded-lg shadow-lg flex flex-col">
 
+    <!-- HEADER -->
+    <div class="flex justify-between items-center p-4 border-b">
+      <h3 class="text-lg font-semibold">Upload PDF Document</h3>
+      <button onclick="closePDFUploadModal()"
+              class="text-gray-500 hover:text-gray-700 font-bold text-xl">&times;</button>
+    </div>
+
+    <!-- BODY -->
+    <div class="p-6">
+      <form id="pdfUploadForm" method="post" enctype="multipart/form-data" action="{% url 'app:upload_customer_pdf' %}">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="upload_customer_pdf">
+        
+        <!-- Customer Selection - NOW OPTIONAL (removed 'required' attribute) -->
+        <div class="mb-4">
+          <label class="text-sm font-medium text-slate-700 mb-1 block">Select Customer (Optional)</label>
+          <select name="customer_id"
+                  class="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white
+                         focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+            <option value="">-- No customer selected (general document) --</option>
+            {% for c in customers %}
+              <option value="{{ c.id }}">{{ c.customer_name }}</option>
+            {% endfor %}
+          </select>
+          <p class="text-xs text-slate-500 mt-1">Leave empty for general documents not tied to a specific customer.</p>
+        </div>
+
+        <!-- PDF File Upload -->
+        <div class="mb-4">
+          <label class="text-sm font-medium text-slate-700 mb-1 block">PDF File</label>
+          <input type="file" name="pdf_file" accept=".pdf" required
+                 class="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white
+                        focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+          <p class="text-xs text-slate-500 mt-1">Maximum file size: 20MB. PDF only.</p>
+        </div>
+
+        <!-- Optional Description -->
+        <div class="mb-4">
+          <label class="text-sm font-medium text-slate-700 mb-1 block">Description (Optional)</label>
+          <textarea name="description" rows="2" maxlength="200"
+                    class="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white
+                           focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="Enter a brief description of this document..."></textarea>
+        </div>
+
+        <!-- Buttons -->
+        <div class="flex justify-end gap-2 pt-2">
+          <button type="button" onclick="closePDFUploadModal()"
+                  class="px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700">
+            Cancel
+          </button>
+          <button type="submit"
+                  class="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white flex items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+            </svg>
+            Upload PDF
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
 
     <div class="p-4 overflow-y-auto max-h-96">
       <ul id="materialList" class="list-disc pl-5 space-y-1 text-sm"></ul>
@@ -927,14 +1024,29 @@ const totalSteps = 3;
 function openCustomerModal() {
     document.getElementById('customerModal').classList.remove('hidden');
     document.getElementById('customerModal').classList.add('flex');
+    if (!window.PART_MASTER_MAP || !Object.keys(window.PART_MASTER_MAP).length) {
+        window.PART_MASTER_MAP = buildPartMasterMapFromDatalist();
+    }
     showStep(currentStep);
 }
-function closeCustomerModal() {
-    document.getElementById('customerModal').classList.add('hidden');
-    document.getElementById('customerForm').reset();
-    currentStep = 1;
-    showStep(currentStep);
+// PDF UPLOAD MODAL FUNCTIONS
+function openPDFUploadModal() {
+    document.getElementById('pdfUploadModal').classList.remove('hidden');
+    document.getElementById('pdfUploadModal').classList.add('flex');
 }
+function closePDFUploadModal() {
+    document.getElementById('pdfUploadModal').classList.add('hidden');
+    document.getElementById('pdfUploadForm').reset();
+}
+
+// Add keyboard support for PDF modal
+document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") {
+        closePDFUploadModal();
+    }
+});
+
+
 
 function showStep(step) {
     document.querySelectorAll('.step').forEach(s => s.classList.add('hidden'));
@@ -955,9 +1067,77 @@ function updateSummary(){
     document.getElementById('summary_part_name').innerText = getVal('part_name');
     document.getElementById('summary_tep_code').innerText = getVal('tep_code');
 }
+window.PART_MASTER_MAP = (function () {
+    try {
+        return {{ part_master_json|default:'{}'|safe }};
+    } catch (e) {
+        return {};
+    }
+})();
+
+function buildPartMasterMapFromDatalist() {
+    const out = {};
+    const dl = document.getElementById('customerPartCodeList');
+    if (!dl) return out;
+
+    dl.querySelectorAll('option').forEach(opt => {
+        const code = (opt.value || '').trim();
+        const name = (opt.getAttribute('data-part-name') || opt.textContent || '').trim();
+        if (!code) return;
+
+        const cleanedName = name.startsWith(code + ' - ')
+            ? name.slice((code + ' - ').length).trim()
+            : name;
+
+        if (!out[code]) {
+            out[code] = cleanedName;
+        }
+    });
+
+    return out;
+}
+
+function syncPartMasterSelection(){
+    const input = document.getElementById('customerPartCode');
+    const partName = document.getElementById('customerPartName');
+    const hint = document.getElementById('customerPartCodeHint');
+    if (!input || !partName) return;
+
+    let map = window.PART_MASTER_MAP || {};
+    if (!Object.keys(map).length) {
+        map = buildPartMasterMapFromDatalist();
+        window.PART_MASTER_MAP = map;
+    }
+
+    const code = (input.value || '').trim();
+    const foundName = map[code] || '';
+
+    partName.value = foundName;
+
+    if (hint) {
+        if (!code) {
+            hint.textContent = 'Type a part code and pick from the suggestions. Part codes are maintained in BOM Master.';
+            hint.className = 'text-xs text-slate-500 -mt-1 mb-2';
+        } else if (foundName) {
+            hint.textContent = 'Selected from BOM Master.';
+            hint.className = 'text-xs text-emerald-600 -mt-1 mb-2';
+        } else {
+            hint.textContent = 'Part code not found in BOM Master. Please choose an existing part code.';
+            hint.className = 'text-xs text-rose-600 -mt-1 mb-2';
+        }
+    }
+}
+
 function validateStep(){
     const stepFields = document.querySelectorAll('#step'+currentStep+' [required]');
-    const allFilled = Array.from(stepFields).every(f=>f.value.trim()!=='');
+    let allFilled = Array.from(stepFields).every(f=>f.value.trim()!=='');
+
+    if (currentStep === 2) {
+        const code = (document.getElementById('customerPartCode')?.value || '').trim();
+        const name = (document.getElementById('customerPartName')?.value || '').trim();
+        allFilled = allFilled && !!code && !!name;
+    }
+
     document.getElementById('prevBtn').disabled=false;
     if(currentStep<totalSteps) document.getElementById('nextBtn').disabled=!allFilled;
     else document.getElementById('saveBtn').disabled=!allFilled;
@@ -985,6 +1165,10 @@ function closeMaterialModal(){
 
         {% endif %}
 
+
+        {% if tab == "bom_master" %}
+          {% include "admin/bom_master.html" %}
+        {% endif %}
 
         {% if tab == "materials" %}
 
@@ -1422,18 +1606,21 @@ function closeMaterialModal(){
               <label class="text-xs font-medium text-slate-600">Part code</label>
               <input
                 type="text"
+                id="forecast-run-part-code"
                 name="part_code"
                 required
                 placeholder="e.g. LT3436-001 REV.D"
                 class="mt-1 h-10 w-full px-3 rounded-xl border border-slate-300 bg-white text-slate-900
                        focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               />
+              <div class="mt-1 text-xs text-slate-500">When a saved BOM exists for this part code, its registered materials will load automatically below.</div>
             </div>
 
             <div>
               <label class="text-xs font-medium text-slate-600">Forecast qty</label>
               <input
                 type="number"
+                id="forecast-run-qty"
                 name="forecast_qty"
                 min="0"
                 required
@@ -1447,10 +1634,43 @@ function closeMaterialModal(){
               <label class="text-xs font-medium text-slate-600">Month</label>
               <input
                 type="month"
+                id="forecast-run-month"
                 name="schedule_month"
                 required
                 class="mt-1 h-10 w-full px-3 rounded-xl border border-slate-300 bg-white text-slate-900
                        focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500" value="{{ fmonth|default:now_month }}">
+            </div>
+
+            <div class="sm:col-span-2">
+              <div class="rounded-2xl border border-slate-200 bg-slate-50 overflow-hidden">
+                <div class="px-4 py-3 border-b border-slate-200 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div class="text-sm font-semibold text-slate-900">Registered BOM Materials</div>
+                    <div class="text-xs text-slate-500">These materials are linked to the selected part code.</div>
+                  </div>
+                  <div id="forecast-bom-count" class="text-xs font-medium text-slate-600">0 materials</div>
+                </div>
+
+                <div id="forecast-bom-status" class="px-4 py-3 text-sm text-slate-500">
+                  Type a part code to load its registered BOM materials.
+                </div>
+
+                <div id="forecast-bom-wrap" class="hidden overflow-x-auto">
+                  <table class="w-full min-w-[620px] text-sm">
+                    <thead class="bg-white text-slate-700">
+                      <tr>
+                        <th class="px-4 py-3 text-left font-semibold">Material</th>
+                        <th class="px-4 py-3 text-left font-semibold">Name</th>
+                        <th class="px-4 py-3 text-right font-semibold">Dim / Qty</th>
+                        <th class="px-4 py-3 text-right font-semibold">Loss %</th>
+                        <th class="px-4 py-3 text-right font-semibold">Total</th>
+                        <th class="px-4 py-3 text-left font-semibold">Unit</th>
+                      </tr>
+                    </thead>
+                    <tbody id="forecast-bom-body" class="divide-y divide-slate-200 bg-white"></tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -1720,13 +1940,13 @@ function closeMaterialModal(){
               </button>
             </div>
 
-            </form>
-          </div>
+          </form>
         </div>
       </div>
-
     </div>
-  </td>
+
+  </div>
+</td>
                   </tr>
                   {% empty %}
                   <tr>
@@ -1739,50 +1959,50 @@ function closeMaterialModal(){
 
               </table>
               {% if stock_page_obj and stock_page_obj.paginator.num_pages > 1 %}
-        <div class="px-5 py-4 border-t border-slate-200 flex items-center justify-between gap-3 flex-wrap">
-          <div class="text-sm text-slate-500">
-            Showing
-            <span class="font-medium text-slate-900">{{ stock_page_obj.start_index }}</span>–
-            <span class="font-medium text-slate-900">{{ stock_page_obj.end_index }}</span>
-            of
-            <span class="font-medium text-slate-900">{{ stock_page_obj.paginator.count }}</span>
-          </div>
+  <div class="px-5 py-4 border-t border-slate-200 flex items-center justify-between gap-3 flex-wrap">
+    <div class="text-sm text-slate-500">
+      Showing
+      <span class="font-medium text-slate-900">{{ stock_page_obj.start_index }}</span>–
+      <span class="font-medium text-slate-900">{{ stock_page_obj.end_index }}</span>
+      of
+      <span class="font-medium text-slate-900">{{ stock_page_obj.paginator.count }}</span>
+    </div>
 
-          <div class="flex items-center gap-2 flex-wrap">
-            {% if stock_page_obj.has_previous %}
-              <a class="px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-sm"
-                href="?tab=stocks&sq={{ sq|urlencode }}&spage={{ stock_page_obj.previous_page_number }}">
-                ← Prev
-              </a>
-            {% else %}
-              <span class="px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-400">
-                ← Prev
-              </span>
-            {% endif %}
-
-            {% for p in stock_page_obj.paginator.page_range %}
-              {% if p == stock_page_obj.number %}
-                <span class="px-3 py-2 rounded-xl bg-blue-600 text-white text-sm">{{ p }}</span>
-              {% elif p >= stock_page_obj.number|add:-2 and p <= stock_page_obj.number|add:2 %}
-                <a class="px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-sm"
-                  href="?tab=stocks&sq={{ sq|urlencode }}&spage={{ p }}">{{ p }}</a>
-              {% endif %}
-            {% endfor %}
-
-            {% if stock_page_obj.has_next %}
-              <a class="px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-sm"
-                href="?tab=stocks&sq={{ sq|urlencode }}&spage={{ stock_page_obj.next_page_number }}">
-                Next →
-              </a>
-            {% else %}
-              <span class="px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-400">
-                Next →
-              </span>
-            {% endif %}
-          </div>
-
-        </div>
+    <div class="flex items-center gap-2 flex-wrap">
+      {% if stock_page_obj.has_previous %}
+        <a class="px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-sm"
+           href="?tab=stocks&sq={{ sq|urlencode }}&spage={{ stock_page_obj.previous_page_number }}">
+          ← Prev
+        </a>
+      {% else %}
+        <span class="px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-400">
+          ← Prev
+        </span>
       {% endif %}
+
+      {% for p in stock_page_obj.paginator.page_range %}
+        {% if p == stock_page_obj.number %}
+          <span class="px-3 py-2 rounded-xl bg-blue-600 text-white text-sm">{{ p }}</span>
+        {% elif p >= stock_page_obj.number|add:-2 and p <= stock_page_obj.number|add:2 %}
+          <a class="px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-sm"
+             href="?tab=stocks&sq={{ sq|urlencode }}&spage={{ p }}">{{ p }}</a>
+        {% endif %}
+      {% endfor %}
+
+      {% if stock_page_obj.has_next %}
+        <a class="px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-sm"
+           href="?tab=stocks&sq={{ sq|urlencode }}&spage={{ stock_page_obj.next_page_number }}">
+          Next →
+        </a>
+      {% else %}
+        <span class="px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-400">
+          Next →
+        </span>
+      {% endif %}
+    </div>
+
+  </div>
+{% endif %}
             </div>
           </div>
         </div>
@@ -2001,734 +2221,6 @@ function closeMaterialModal(){
         </div>
 
         {% endif %}
-
-        
-  {% if tab == "forecast" %}
-
-        <div class="grid grid-cols-1 gap-6">
-          <div class="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
-    <div class="px-5 py-4 border-b border-slate-200 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-      <div>
-        <h2 class="text-lg font-semibold text-slate-900">Current Forecast Records</h2>
-        <p class="text-sm text-slate-500">{{ fs_fore_year|default:"2026" }} Forecast</p>
-      </div>
-      
-      <div class="flex items-center gap-2">
-        <span class="text-sm text-slate-600">Total: <span class="font-semibold text-slate-900">{{ forecasts_total }}</span></span>
-      </div>
-    </div>
-
-    <div class="px-5 py-3 border-b border-slate-200">
-      <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div class="flex flex-wrap gap-2 items-center">
-          <form method="get" class="flex gap-2">
-            <input type="hidden" name="tab" value="forecast">
-            <select name="fcustomer" 
-                    class="h-10 px-3 rounded-xl border border-slate-300 bg-white text-sm text-slate-700
-                           focus:outline-none focus:ring-2 focus:ring-blue-500">
-              <option value="">All Customers</option>
-              {% for customer in all_customers %}
-                <option value="{{ customer.customer_name }}" {% if fcustomer == customer.customer_name %}selected{% endif %}>
-                  {{ customer.customer_name }}
-                </option>
-              {% endfor %}
-            </select>
-            <input
-              type="text"
-              name="fq"
-              value="{{ fq|default:'' }}"
-              placeholder="Search part number / part name..."
-              class="h-10 w-80 max-w-full px-3 rounded-xl bg-white border border-slate-300 text-slate-900
-                     focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-            />
-            <button class="h-10 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white" type="submit">
-              Search
-            </button>
-            <a href="?tab=forecast" 
-               class="h-10 px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-sm flex items-center">
-              Reset
-            </a>
-          </form>
-        </div>
-        
-        <div class="flex flex-wrap gap-2 items-center justify-end">
-          <button type="button"
-                  id="open-forecast-csv"
-                  class="h-10 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white whitespace-nowrap">
-            CSV Upload
-          </button>
-          <a href="#"
-             id="open-forecast-form"
-             class="h-10 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white whitespace-nowrap flex items-center justify-center">
-            + Add Forecast
-          </a>
-        </div>
-      </div>
-    </div>
-    <div>
-      <table class="w-full text-sm">
-        <thead class="bg-slate-50 text-slate-700">
-          <tr>
-            <th class="px-4 py-3 text-left">Customer</th>
-            <th class="px-4 py-3 text-left">Part Number</th>
-            <th class="px-4 py-3 text-left">Part Name</th>
-            <th class="px-4 py-3 text-left">Unit Price</th>
-            <th class="px-4 py-3 text-left">Month</th>
-            <th class="px-4 py-3 text-left">Quantity</th>
-            <th class="px-4 py-3 text-right">Action</th>
-          </tr>
-        </thead>
-
-        <tbody>
-          {% for forecast in forecasts_list %}
-            {% with monthly=forecast.monthly_forecasts %}
-              {% if monthly %}
-                {% for m in monthly %}
-                <tr class="border-t border-slate-200 hover:bg-slate-50">
-                  <td class="px-4 py-3 font-medium">{{ forecast.customer.customer_name }}</td>
-                  <td class="px-4 py-3">{{ forecast.part_number }}</td>
-                  <td class="px-4 py-3">{{ forecast.part_name }}</td>
-                  <td class="px-4 py-3">
-                    {% if m.unit_price is not None %}
-                      {{ m.unit_price|floatformat:5 }}
-                    {% else %}
-                      {{ forecast.unit_price_display|floatformat:5 }}
-                    {% endif %}
-                  </td>
-                  <td class="px-4 py-3">
-                    {{ m.date }}
-                  </td>
-                  <td class="px-4 py-3">
-                    {{ m.quantity|default:0|floatformat:0|intcomma }}
-                  </td>
-                  <td class="px-4 py-3 text-right">
-                    <div class="inline-flex items-center gap-2">
-                      <a href="#"
-                         class="edit-forecast-btn px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-blue-500 text-black inline-block"
-                         data-customer="{{ forecast.customer.customer_name }}"
-                         data-part-number="{{ forecast.part_number }}"
-                         data-part-name="{{ forecast.part_name }}"
-                         data-unit-price="{{ m.unit_price|default:forecast.unit_price_display }}"
-                         data-quantity="{{ m.quantity|default:0 }}"
-                         data-date="{{ m.date }}"
-                         >
-                        Edit
-                      </a>
-                      <form method="post" action="{% url 'app:admin_dashboard' %}" class="inline"
-                            onsubmit="return confirm('Are you sure you want to delete this forecast month for {{ forecast.customer.customer_name }} - {{ forecast.part_number }} ({{ m.date }})?');">
-                        {% csrf_token %}
-                        <input type="hidden" name="action" value="delete_forecast">
-                        <input type="hidden" name="customer_name" value="{{ forecast.customer.customer_name }}">
-                        <input type="hidden" name="part_number" value="{{ forecast.part_number }}">
-                        <input type="hidden" name="forecast_id" value="{{ forecast.id }}">
-                        <input type="hidden" name="date" value="{{ m.date }}">
-                        <button type="submit"
-                                class="px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white">
-                          Delete
-                        </button>
-                      </form>
-                    </div>
-                  </td>
-                </tr>
-                {% endfor %}
-              {% else %}
-                <tr class="border-t border-slate-200 hover:bg-slate-50">
-                  <td class="px-4 py-3 font-medium">{{ forecast.customer.customer_name }}</td>
-                  <td class="px-4 py-3">{{ forecast.part_number }}</td>
-                  <td class="px-4 py-3">{{ forecast.part_name }}</td>
-                  <td class="px-4 py-3">{{ forecast.unit_price_display|floatformat:5 }}</td>
-                  <td class="px-4 py-3">—</td>
-                  <td class="px-4 py-3">0</td>
-                  <td class="px-4 py-3 text-right">
-                    <span class="text-xs text-slate-400">No monthly data</span>
-                  </td>
-                </tr>
-              {% endif %}
-            {% endwith %}
-          {% empty %}
-          <tr>
-            <td colspan="7" class="px-4 py-10 text-center text-slate-500">
-              No current forecast records found. Click "+ Add Forecast" to create one.
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    <!-- Add Pagination Here -->
-    {% if forecasts_list.paginator.num_pages > 1 %}
-    <div class="px-5 py-4 border-t border-slate-200 flex items-center justify-between">
-      <div class="text-sm text-slate-600">
-        Showing <span class="font-semibold">{{ forecasts_list.start_index }}</span> 
-        - <span class="font-semibold">{{ forecasts_list.end_index }}</span> 
-        of <span class="font-semibold">{{ forecasts_total }}</span>
-      </div>
-      <div class="flex items-center gap-1">
-        {% if forecasts_list.has_previous %}
-        <a href="?tab=forecast&page={{ forecasts_list.previous_page_number }}{% if fcustomer %}&fcustomer={{ fcustomer }}{% endif %}{% if fq %}&fq={{ fq }}{% endif %}" 
-           class="px-3 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-sm">
-          ← Prev
-        </a>
-        {% else %}
-        <span class="px-3 py-1 rounded-lg border border-slate-200 bg-slate-50 text-slate-400 text-sm cursor-not-allowed">
-          ← Prev
-        </span>
-        {% endif %}
-        
-        {% for num in forecasts_list.paginator.page_range %}
-          {% if num == forecasts_list.number %}
-            <span class="px-3 py-1 rounded-lg bg-blue-600 text-white text-sm font-semibold">{{ num }}</span>
-          {% elif num > forecasts_list.number|add:'-3' and num < forecasts_list.number|add:'3' %}
-            <a href="?tab=forecast&page={{ num }}{% if fcustomer %}&fcustomer={{ fcustomer }}{% endif %}{% if fq %}&fq={{ fq }}{% endif %}" 
-               class="px-3 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-sm">
-              {{ num }}
-            </a>
-          {% endif %}
-        {% endfor %}
-        
-        {% if forecasts_list.has_next %}
-        <a href="?tab=forecast&page={{ forecasts_list.next_page_number }}{% if fcustomer %}&fcustomer={{ fcustomer }}{% endif %}{% if fq %}&fq={{ fq }}{% endif %}" 
-           class="px-3 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-sm">
-          Next →
-        </a>
-        {% else %}
-        <span class="px-3 py-1 rounded-lg border border-slate-200 bg-slate-50 text-slate-400 text-sm cursor-not-allowed">
-          Next →
-        </span>
-        {% endif %}
-      </div>
-    </div>
-    {% endif %}
-  </div>
-        </div>
-  {% endif %}
-
-  {% if tab == "previous_forecast" %}
-<div class="grid grid-cols-1 gap-6">
-  <div class="forecast-panel-card">
-    <div class="forecast-panel-header">
-      <div class="forecast-filters">
-        <div>
-          <h2 class="text-lg font-semibold text-slate-900">Previous Forecast Details</h2>
-          <p class="text-sm text-slate-500">{{ fs_prev_year|default:"Previous Year" }} monthly forecast by part number</p>
-        </div>
-
-        <form method="get" class="flex flex-wrap gap-2 items-center">
-          <input type="hidden" name="tab" value="previous_forecast">
-          
-          <!-- Customer Filter -->
-          <select name="pf_customer"
-                  class="h-10 px-3 rounded-xl border border-slate-300 bg-white text-sm text-slate-700
-                         focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All Customers</option>
-            {% for c in prev_customers %}
-              <option value="{{ c }}" {% if pf_customer == c %}selected{% endif %}>{{ c }}</option>
-            {% endfor %}
-          </select>
-          
-          <!-- Month Filter -->
-          <select name="pf_month"
-                  class="h-10 px-3 rounded-xl border border-slate-300 bg-white text-sm text-slate-700
-                         focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All Months</option>
-            <option value="JAN" {% if pf_month == 'JAN' %}selected{% endif %}>January</option>
-            <option value="FEB" {% if pf_month == 'FEB' %}selected{% endif %}>February</option>
-            <option value="MAR" {% if pf_month == 'MAR' %}selected{% endif %}>March</option>
-            <option value="APR" {% if pf_month == 'APR' %}selected{% endif %}>April</option>
-            <option value="MAY" {% if pf_month == 'MAY' %}selected{% endif %}>May</option>
-            <option value="JUN" {% if pf_month == 'JUN' %}selected{% endif %}>June</option>
-            <option value="JUL" {% if pf_month == 'JUL' %}selected{% endif %}>July</option>
-            <option value="AUG" {% if pf_month == 'AUG' %}selected{% endif %}>August</option>
-            <option value="SEP" {% if pf_month == 'SEP' %}selected{% endif %}>September</option>
-            <option value="OCT" {% if pf_month == 'OCT' %}selected{% endif %}>October</option>
-            <option value="NOV" {% if pf_month == 'NOV' %}selected{% endif %}>November</option>
-            <option value="DEC" {% if pf_month == 'DEC' %}selected{% endif %}>December</option>
-          </select>
-          
-          <!-- Search Box -->
-          <input type="text" name="pf_q" value="{{ pf_q|default:'' }}"
-                 placeholder="Search part number / name…"
-                 class="h-10 px-3 w-60 max-w-full rounded-xl border border-slate-300 bg-white text-sm text-slate-700
-                        focus:outline-none focus:ring-2 focus:ring-blue-500">
-          
-          <button type="submit"
-                  class="h-10 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm">
-            Filter
-          </button>
-          
-          <a href="?tab=previous_forecast"
-             class="h-10 px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-sm flex items-center">
-            Reset
-          </a>
-        </form>
-      </div>
-    </div>
-
-    <div class="forecast-panel-body">
-      <div class="fs-table-wrap">
-        <table class="fs-table">
-        <thead>
-          <!-- Row 1: Main header for PREVIOUS FORECAST -->
-          <tr>
-            <!-- Left columns -->
-            <th class="fs-col-header" style="padding: 8px 6px;">CUSTOMER</th>
-            <th class="fs-col-header" style="min-width:130px; padding: 8px 6px;">PART NUMBER</th>
-            <th class="fs-col-header" style="min-width:140px; padding: 8px 6px;">PART NAME</th>
-            <th class="fs-col-header" style="min-width:70px; padding: 8px 6px;">UNIT PRICE</th>
-
-            <!-- PREVIOUS FORECAST header -->
-            <th class="fs-section-prev" colspan="{{ fs_prev_months|length }}" style="padding: 8px 4px;">
-              PREVIOUS FORECAST ({{ fs_prev_year|default:"Previous Year" }})
-            </th>
-          </tr>
-
-          <!-- Row 2: Month columns -->
-          <tr>
-            <!-- Left columns (empty cells for alignment) -->
-            <th class="fs-col-header" style="padding: 6px 4px;"></th>
-            <th class="fs-col-header" style="padding: 6px 4px;"></th>
-            <th class="fs-col-header" style="padding: 6px 4px;"></th>
-            <th class="fs-col-header" style="padding: 6px 4px;"></th>
-
-            <!-- Previous Forecast Months (JAN–DEC) -->
-            {% for month in fs_prev_months %}
-              <th
-                class="fs-col-header prev-month"
-                style="padding: 6px 4px;"
-              >
-                {{ month }}
-              </th>
-            {% endfor %}
-          </tr>
-        </thead>
-
-        <tbody>
-          {% for row in prev_rows %}
-          <tr class="data-row">
-            <td style="padding: 8px 6px; text-align: left;">{{ row.customer }}</td>
-            <td class="font-mono" style="padding: 8px 6px; text-align: left;">{{ row.part_number }}</td>
-            <td style="padding: 8px 6px; text-align: left;">{{ row.part_name }}</td>
-            <td style="padding: 8px 6px; text-align: right;">{{ row.unit_price|floatformat:4 }}</td>
-
-            <!-- Previous Forecast Months (JAN–DEC) -->
-            {% for month in fs_prev_months %}
-              <td style="padding: 8px 4px; text-align: center;">
-                {% with val=row.months|get_item:month %}
-                  {% if val %}{{ val|floatformat:0|intcomma }}{% else %}-{% endif %}
-                {% endwith %}
-              </td>
-            {% endfor %}
-          </tr>
-          {% empty %}
-          <tr>
-            <td colspan="16" class="px-6 py-12 text-center text-slate-400 text-sm">
-              No previous forecast records found.
-            </td>
-          </tr>
-          {% endfor %}
-
-          <!-- TOTAL QTY row -->
-          {% if prev_rows %}
-          <tr class="total-row">
-            <td></td>
-            <td></td>
-            <td class="text-left font-bold text-slate-700" style="padding: 8px 6px;">TOTAL QTY</td>
-            <td></td>
-
-            <!-- Previous Forecast Totals -->
-            {% for month in fs_prev_months %}
-              <td style="padding: 8px 4px; text-align: center;">
-                {{ prev_total_qty|get_item:month|default:"—"|intcomma }}
-              </td>
-            {% endfor %}
-          </tr>
-          {% endif %}
-        </tbody>
-      </table>
-      </div>
-    </div>
-  </div>
-</div>
-{% endif %}
-
-  {% if tab == "forecast_summary" %}
-<div class="grid grid-cols-1 gap-6">
-  <div class="forecast-panel-card">
-    <div class="forecast-panel-header">
-      <div class="forecast-filters">
-        <div>
-          <h2 class="text-lg font-semibold text-slate-900">Forecast Summary</h2>
-          <p class="text-sm text-slate-500">{{ fs_fore_year|default:"Current Year" }} monthly forecast by part number</p>
-        </div>
-
-        <form method="get" class="flex flex-wrap gap-2 items-center">
-          <input type="hidden" name="tab" value="forecast_summary">
-          
-          <!-- Customer Filter -->
-          <select name="fsq_customer"
-                  class="h-10 px-3 rounded-xl border border-slate-300 bg-white text-sm text-slate-700
-                         focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All Customers</option>
-            {% for c in fs_customers %}
-              <option value="{{ c }}" {% if fsq_customer == c %}selected{% endif %}>{{ c }}</option>
-            {% endfor %}
-          </select>
-          
-          <!-- Month Filter -->
-          <select name="fs_month"
-                  class="h-10 px-3 rounded-xl border border-slate-300 bg-white text-sm text-slate-700
-                         focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All Months</option>
-            <option value="JAN" {% if fs_month == 'JAN' %}selected{% endif %}>January</option>
-            <option value="FEB" {% if fs_month == 'FEB' %}selected{% endif %}>February</option>
-            <option value="MAR" {% if fs_month == 'MAR' %}selected{% endif %}>March</option>
-            <option value="APR" {% if fs_month == 'APR' %}selected{% endif %}>April</option>
-            <option value="MAY" {% if fs_month == 'MAY' %}selected{% endif %}>May</option>
-            <option value="JUN" {% if fs_month == 'JUN' %}selected{% endif %}>June</option>
-            <option value="JUL" {% if fs_month == 'JUL' %}selected{% endif %}>July</option>
-            <option value="AUG" {% if fs_month == 'AUG' %}selected{% endif %}>August</option>
-            <option value="SEP" {% if fs_month == 'SEP' %}selected{% endif %}>September</option>
-            <option value="OCT" {% if fs_month == 'OCT' %}selected{% endif %}>October</option>
-            <option value="NOV" {% if fs_month == 'NOV' %}selected{% endif %}>November</option>
-            <option value="DEC" {% if fs_month == 'DEC' %}selected{% endif %}>December</option>
-          </select>
-           
-          <!-- Search Box -->
-          <input type="text" name="fsq" value="{{ fsq|default:'' }}"
-                 placeholder="Search part number / name…"
-                 class="h-10 px-3 w-60 max-w-full rounded-xl border border-slate-300 bg-white text-sm text-slate-700
-                        focus:outline-none focus:ring-2 focus:ring-blue-500">
-          
-          <button type="submit"
-                  class="h-10 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm">
-            Filter
-          </button>
-          
-          <a href="?tab=forecast_summary"
-             class="h-10 px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-sm flex items-center">
-            Reset
-          </a>
-        </form>
-      </div>
-    </div>
-
-    <div class="forecast-panel-body">
-      <div class="fs-table-wrap">
-        <table class="fs-table">
-        <thead>
-          <!-- Row 1: Main header for FORECAST (Current Year) -->
-          <tr>
-            <!-- Left columns -->
-            <th class="fs-col-header" style="padding: 8px 6px;">CUSTOMER</th>
-            <th class="fs-col-header" style="min-width:130px; padding: 8px 6px;">PART NUMBER</th>
-            <th class="fs-col-header" style="min-width:140px; padding: 8px 6px;">PART NAME</th>
-            <th class="fs-col-header" style="min-width:70px; padding: 8px 6px;">UNIT PRICE</th>
-
-            <!-- FORECAST header -->
-            <th class="fs-section-fore" colspan="{{ fs_fore_months|length }}" style="padding: 8px 4px;">
-              FORECAST ({{ fs_fore_year|default:"Current Year" }})
-            </th>
-          </tr>
-
-          <!-- Row 2: Month columns -->
-          <tr>
-            <!-- Left columns (empty cells for alignment) -->
-            <th class="fs-col-header" style="padding: 6px 4px;"></th>
-            <th class="fs-col-header" style="padding: 6px 4px;"></th>
-            <th class="fs-col-header" style="padding: 6px 4px;"></th>
-            <th class="fs-col-header" style="padding: 6px 4px;"></th>
-
-            <!-- Forecast Months (JAN–DEC) -->
-            {% for month in fs_fore_months %}
-              <th
-                class="fs-col-header fore-month"
-                style="padding: 6px 4px;"
-              >
-                {{ month }}
-              </th>
-            {% endfor %}
-          </tr>
-        </thead>
-
-        <tbody>
-          {% for row in fs_rows %}
-          <tr class="data-row">
-            <td style="padding: 8px 6px; text-align: left;">{{ row.customer }}</td>
-            <td class="font-mono" style="padding: 8px 6px; text-align: left;">{{ row.part_number }}</td>
-            <td style="padding: 8px 6px; text-align: left;">{{ row.part_name }}</td>
-            <td style="padding: 8px 6px; text-align: right;">{{ row.unit_price|floatformat:4 }}</td>
-
-            <!-- Forecast Months (JAN–DEC) - Current Year Only -->
-            {% for month in fs_fore_months %}
-              <td style="padding: 8px 4px; text-align: center;">
-                {% with val=row.fore|get_item:month %}
-                  {% if val %}{{ val|floatformat:0|intcomma }}{% else %}0{% endif %}
-                {% endwith %}
-              </td>
-            {% endfor %}
-          </tr>
-          {% empty %}
-          <tr>
-            <td colspan="16" class="px-6 py-12 text-center text-slate-400 text-sm">
-              No forecast records found for {{ fs_fore_year|default:"current year" }}.
-            </td>
-          </tr>
-          {% endfor %}
-
-          <!-- TOTAL QTY row -->
-          {% if fs_rows %}
-          <tr class="total-row">
-            <td></td>
-            <td></td>
-            <td class="text-left font-bold text-slate-700" style="padding: 8px 6px;">TOTAL QTY</td>
-            <td></td>
-
-            <!-- Forecast Totals - Current Year Only -->
-            {% for month in fs_fore_months %}
-              <td style="padding: 8px 4px; text-align: center;">
-                {{ fs_total_fore_qty|get_item:month|default:"—"|intcomma }}
-              </td>
-            {% endfor %}
-          </tr>
-
-
-          {% endif %}
-        </tbody>
-      </table>
-      </div>
-    </div>
-  </div>
-</div>
-{% endif %}
-
-  {% if tab == "actual_delivered" %}
-<div class="grid grid-cols-1 gap-6">
-  <div class="forecast-panel-card">
-    <div class="forecast-panel-header">
-      <div class="forecast-filters">
-        <div>
-          <h2 class="text-lg font-semibold text-slate-900">Actual Delivered</h2>
-          <p class="text-sm text-slate-500">{{ ad_year|default:"Current Year" }} actual delivered by part number</p>
-        </div>
-
-        <form method="get" class="flex flex-wrap gap-2 items-center">
-          <input type="hidden" name="tab" value="actual_delivered">
-          <select name="ad_customer"
-                  class="h-10 px-3 rounded-xl border border-slate-300 bg-white text-sm text-slate-700
-                         focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All Customers</option>
-            {% for c in ad_customers %}
-              <option value="{{ c }}" {% if ad_customer == c %}selected{% endif %}>{{ c }}</option>
-            {% endfor %}
-          </select>
-          <input type="text" name="ad_q" value="{{ ad_q|default:'' }}"
-                 placeholder="Search part number / name…"
-                 class="h-10 px-3 w-60 max-w-full rounded-xl border border-slate-300 bg-white text-sm text-slate-700
-                        focus:outline-none focus:ring-2 focus:ring-blue-500">
-          <button type="submit"
-                  class="h-10 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm">
-            Filter
-          </button>
-          <a href="?tab=actual_delivered"
-             class="h-10 px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-sm flex items-center">
-            Reset
-          </a>
-        </form>
-      </div>
-    </div>
-
-    <div class="forecast-panel-body">
-      <div class="fs-table-wrap">
-        <table class="fs-table">
-        <thead>
-          <tr>
-            <th class="fs-col-header" style="padding: 8px 6px;">CUSTOMER</th>
-            <th class="fs-col-header" style="min-width:130px; padding: 8px 6px;">PART NUMBER</th>
-            <th class="fs-col-header" style="min-width:140px; padding: 8px 6px;">PART NAME</th>
-            <th class="fs-col-header" style="min-width:70px; padding: 8px 6px;">UNIT PRICE</th>
-
-            <th class="fs-section-prev" colspan="{{ ad_months|length }}" style="padding: 8px 4px;">
-              ACTUAL DELIVERED ({{ ad_year|default:"Current Year" }})
-            </th>
-          </tr>
-
-          <tr>
-            <th class="fs-col-header" style="padding: 6px 4px;"></th>
-            <th class="fs-col-header" style="padding: 6px 4px;"></th>
-            <th class="fs-col-header" style="padding: 6px 4px;"></th>
-            <th class="fs-col-header" style="padding: 6px 4px;"></th>
-
-            {% for month in ad_months %}
-              <th
-                class="fs-col-header prev-month"
-                style="padding: 6px 4px;"
-              >
-                {{ month }}
-              </th>
-            {% endfor %}
-          </tr>
-        </thead>
-
-        <tbody>
-          {% for row in ad_rows %}
-          <tr class="data-row">
-            <td style="padding: 8px 6px; text-align: left;">{{ row.customer }}</td>
-            <td class="font-mono" style="padding: 8px 6px; text-align: left;">{{ row.part_number }}</td>
-            <td style="padding: 8px 6px; text-align: left;">{{ row.part_name }}</td>
-            <td style="padding: 8px 6px; text-align: right;">{{ row.unit_price|floatformat:4 }}</td>
-
-            {% for month in ad_months %}
-              <td style="padding: 8px 4px; text-align: center;">
-                {% with val=row.months|get_item:month %}
-                  {% if val %}{{ val|floatformat:0|intcomma }}{% else %}-{% endif %}
-                {% endwith %}
-              </td>
-            {% endfor %}
-          </tr>
-          {% empty %}
-          <tr>
-            <td colspan="16" class="px-6 py-12 text-center text-slate-400 text-sm">
-              No actual delivered records found.
-            </td>
-          </tr>
-          {% endfor %}
-
-          {% if ad_rows %}
-          <tr class="total-row">
-            <td></td>
-            <td></td>
-            <td class="text-left font-bold text-slate-700" style="padding: 8px 6px;">TOTAL QTY</td>
-            <td></td>
-
-            {% for month in ad_months %}
-              <td style="padding: 8px 4px; text-align: center;">
-                {{ ad_total_qty|get_item:month|default:"—"|intcomma }}
-              </td>
-            {% endfor %}
-          </tr>
-          {% endif %}
-        </tbody>
-      </table>
-    </div>
-  </div>
-  {% endif %}
-</div>
-
-  </div>
-
-  <!-- Edit Forecast Panel -->
-  <div id="edit-forecast-backdrop" class="hidden fixed inset-0 bg-black/50 z-40"></div>
-
-  <div id="edit-forecast-panel"
-       class="fixed top-0 right-0 h-full w-full sm:w-[500px]
-              bg-white text-slate-900 border-l border-slate-200 z-50
-              translate-x-full transition-transform duration-200 flex flex-col">
-
-    <div class="p-4 border-b border-slate-200 flex justify-between items-center">
-      <div>
-        <div class="font-semibold text-blue-700">Edit Forecast</div>
-        <div class="text-xs text-slate-500">Update forecast record</div>
-      </div>
-      <button id="edit-forecast-close"
-              class="px-3 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-200">
-        Close
-      </button>
-    </div>
-
-    <div id="edit-forecast-content" class="flex-1 overflow-y-auto p-6">
-      <form method="post" action="{% url 'app:admin_dashboard' %}" class="space-y-5" id="edit-forecast-form">
-        {% csrf_token %}
-        <input type="hidden" name="action" value="update_forecast">
-        <input type="hidden" name="original_customer_name" id="edit-original-customer" value="">
-        <input type="hidden" name="original_part_number" id="edit-original-part-number" value="">
-        <input type="hidden" name="original_date" id="edit-original-date" value="">
-
-        <div>
-          <label class="text-sm font-medium text-slate-700">Customer Name</label>
-          <input type="text" name="customer_name" id="edit-customer-name" required
-                 class="mt-1 w-full px-3 py-2 rounded-xl border border-slate-300 bg-white
-                        focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                 placeholder="Enter customer name">
-        </div>
-
-        <div>
-          <label class="text-sm font-medium text-slate-700">Part Name</label>
-          <input type="text" name="part_name" id="edit-part-name" required
-                 class="mt-1 w-full px-3 py-2 rounded-xl border border-slate-300 bg-white
-                        focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                 placeholder="Enter part name">
-        </div>
-
-        <div>
-          <label class="text-sm font-medium text-slate-700">Part Number</label>
-          <input type="text" name="part_number" id="edit-part-number" required
-                 class="mt-1 w-full px-3 py-2 rounded-xl border border-slate-300 bg-white
-                        focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                 placeholder="Enter part number">
-        </div>
-
-        <div>
-          <label class="text-sm font-medium text-slate-700">Month/Year</label>
-          <div class="grid grid-cols-2 gap-3">
-            <select name="month" id="edit-month"
-                    class="px-3 py-2 rounded-xl border border-slate-300 bg-white
-                           focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-              <option value="">Keep existing month</option>
-              <option value="January">January</option>
-              <option value="February">February</option>
-              <option value="March">March</option>
-              <option value="April">April</option>
-              <option value="May">May</option>
-              <option value="June">June</option>
-              <option value="July">July</option>
-              <option value="August">August</option>
-              <option value="September">September</option>
-              <option value="October">October</option>
-              <option value="November">November</option>
-              <option value="December">December</option>
-            </select>
-            <select name="year" id="edit-year"
-                    class="px-3 py-2 rounded-xl border border-slate-300 bg-white
-                           focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-              <option value="">Keep existing year</option>
-              <option value="2024">2024</option>
-              <option value="2025">2025</option>
-              <option value="2026">2026</option>
-              <option value="2027">2027</option>
-              <option value="2028">2028</option>
-            </select>
-          </div>
-        </div>
-
-        <div>
-          <label class="text-sm font-medium text-slate-700">Unit Price</label>
-          <input type="number" name="unit_price" id="edit-unit-price" step="any" min="0" required
-                 class="mt-1 w-full px-3 py-2 rounded-xl border border-slate-300 bg-white
-                        focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                 placeholder="0.00">
-        </div>
-
-        <div>
-          <label class="text-sm font-medium text-slate-700">Quantity</label>
-          <input type="number" name="quantity" id="edit-quantity" min="1" required
-                 class="mt-1 w-full px-3 py-2 rounded-xl border border-slate-300 bg-white
-                        focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                 placeholder="Enter quantity">
-        </div>
-
-        <div class="pt-4 border-t border-slate-200 flex justify-end gap-2">
-          <button type="button" id="edit-forecast-cancel"
-                  class="px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50">
-            Cancel
-          </button>
-          <button type="submit"
-                  class="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white">
-            Update Forecast
-          </button>
-        </div>
-      </form>
-    </div>
-  </div>
 
       </div>
     </div>
@@ -3153,7 +2645,734 @@ function closeMaterialModal(){
   <title>Admin Dashboard - Forecast</title>
   <script src="https://cdn.tailwindcss.com"></script>
 
+  
 
+
+
+
+  <!-- Forecast Tab Navigation removed per request -->
+
+  {% if tab == "forecast" %}
+
+        <div class="grid grid-cols-1 gap-6">
+          <div class="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
+    <div class="px-5 py-4 border-b border-slate-200 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+      <div>
+        <h2 class="text-lg font-semibold text-slate-900">Current Forecast Records</h2>
+        <p class="text-sm text-slate-500">{{ fs_fore_year|default:"2026" }} Forecast</p>
+      </div>
+      
+      <div class="flex items-center gap-2">
+        <span class="text-sm text-slate-600">Total: <span class="font-semibold text-slate-900">{{ forecasts_total }}</span></span>
+      </div>
+    </div>
+
+    <div class="px-5 py-3 border-b border-slate-200">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div class="flex flex-wrap gap-2 items-center">
+          <form method="get" class="flex gap-2">
+            <input type="hidden" name="tab" value="forecast">
+            <select name="fcustomer" 
+                    class="h-10 px-3 rounded-xl border border-slate-300 bg-white text-sm text-slate-700
+                           focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="">All Customers</option>
+              {% for customer in all_customers %}
+                <option value="{{ customer.customer_name }}" {% if fcustomer == customer.customer_name %}selected{% endif %}>
+                  {{ customer.customer_name }}
+                </option>
+              {% endfor %}
+            </select>
+            <input
+              type="text"
+              name="fq"
+              value="{{ fq|default:'' }}"
+              placeholder="Search part number / part name..."
+              class="h-10 w-80 max-w-full px-3 rounded-xl bg-white border border-slate-300 text-slate-900
+                     focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            />
+            <button class="h-10 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white" type="submit">
+              Search
+            </button>
+            <a href="?tab=forecast" 
+               class="h-10 px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-sm flex items-center">
+              Reset
+            </a>
+          </form>
+        </div>
+        
+        <div class="flex flex-wrap gap-2 items-center justify-end">
+          <button type="button"
+                  id="open-forecast-csv"
+                  class="h-10 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white whitespace-nowrap">
+            CSV Upload
+          </button>
+          <a href="#"
+             id="open-forecast-form"
+             class="h-10 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white whitespace-nowrap flex items-center justify-center">
+            + Add Forecast
+          </a>
+        </div>
+      </div>
+    </div>
+    <div>
+      <table class="w-full text-sm">
+        <thead class="bg-slate-50 text-slate-700">
+          <tr>
+            <th class="px-4 py-3 text-left">Customer</th>
+            <th class="px-4 py-3 text-left">Part Number</th>
+            <th class="px-4 py-3 text-left">Part Name</th>
+            <th class="px-4 py-3 text-left">Unit Price</th>
+            <th class="px-4 py-3 text-left">Month</th>
+            <th class="px-4 py-3 text-left">Quantity</th>
+            <th class="px-4 py-3 text-right">Action</th>
+          </tr>
+        </thead>
+
+        <tbody>
+          {% for forecast in forecasts_list %}
+            {% with monthly=forecast.monthly_forecasts %}
+              {% if monthly %}
+                {% for m in monthly %}
+                <tr class="border-t border-slate-200 hover:bg-slate-50">
+                  <td class="px-4 py-3 font-medium">{{ forecast.customer.customer_name }}</td>
+                  <td class="px-4 py-3">{{ forecast.part_number }}</td>
+                  <td class="px-4 py-3">{{ forecast.part_name }}</td>
+                  <td class="px-4 py-3">
+                    {% if m.unit_price is not None %}
+                      {{ m.unit_price|floatformat:5 }}
+                    {% else %}
+                      {{ forecast.unit_price_display|floatformat:5 }}
+                    {% endif %}
+                  </td>
+                  <td class="px-4 py-3">
+                    {{ m.date }}
+                  </td>
+                  <td class="px-4 py-3">
+                    {{ m.quantity|default:0|floatformat:0|intcomma }}
+                  </td>
+                  <td class="px-4 py-3 text-right">
+                    <div class="inline-flex items-center gap-2">
+                      <a href="#"
+                         class="edit-forecast-btn px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-blue-500 text-black inline-block"
+                         data-customer="{{ forecast.customer.customer_name }}"
+                         data-part-number="{{ forecast.part_number }}"
+                         data-part-name="{{ forecast.part_name }}"
+                         data-unit-price="{{ m.unit_price|default:forecast.unit_price_display }}"
+                         data-quantity="{{ m.quantity|default:0 }}"
+                         data-date="{{ m.date }}"
+                         >
+                        Edit
+                      </a>
+                      <form method="post" action="{% url 'app:admin_dashboard' %}" class="inline"
+                            onsubmit="return confirm('Are you sure you want to delete this forecast month for {{ forecast.customer.customer_name }} - {{ forecast.part_number }} ({{ m.date }})?');">
+                        {% csrf_token %}
+                        <input type="hidden" name="action" value="delete_forecast">
+                        <input type="hidden" name="customer_name" value="{{ forecast.customer.customer_name }}">
+                        <input type="hidden" name="part_number" value="{{ forecast.part_number }}">
+                        <input type="hidden" name="forecast_id" value="{{ forecast.id }}">
+                        <input type="hidden" name="date" value="{{ m.date }}">
+                        <button type="submit"
+                                class="px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white">
+                          Delete
+                        </button>
+                      </form>
+                    </div>
+                  </td>
+                </tr>
+                {% endfor %}
+              {% else %}
+                <tr class="border-t border-slate-200 hover:bg-slate-50">
+                  <td class="px-4 py-3 font-medium">{{ forecast.customer.customer_name }}</td>
+                  <td class="px-4 py-3">{{ forecast.part_number }}</td>
+                  <td class="px-4 py-3">{{ forecast.part_name }}</td>
+                  <td class="px-4 py-3">{{ forecast.unit_price_display|floatformat:5 }}</td>
+                  <td class="px-4 py-3">—</td>
+                  <td class="px-4 py-3">0</td>
+                  <td class="px-4 py-3 text-right">
+                    <span class="text-xs text-slate-400">No monthly data</span>
+                  </td>
+                </tr>
+              {% endif %}
+            {% endwith %}
+          {% empty %}
+          <tr>
+            <td colspan="7" class="px-4 py-10 text-center text-slate-500">
+              No current forecast records found. Click "+ Add Forecast" to create one.
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <!-- Add Pagination Here -->
+    {% if forecasts_list.paginator.num_pages > 1 %}
+    <div class="px-5 py-4 border-t border-slate-200 flex items-center justify-between">
+      <div class="text-sm text-slate-600">
+        Showing <span class="font-semibold">{{ forecasts_list.start_index }}</span> 
+        - <span class="font-semibold">{{ forecasts_list.end_index }}</span> 
+        of <span class="font-semibold">{{ forecasts_total }}</span>
+      </div>
+      <div class="flex items-center gap-1">
+        {% if forecasts_list.has_previous %}
+        <a href="?tab=forecast&page={{ forecasts_list.previous_page_number }}{% if fcustomer %}&fcustomer={{ fcustomer }}{% endif %}{% if fq %}&fq={{ fq }}{% endif %}" 
+           class="px-3 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-sm">
+          ← Prev
+        </a>
+        {% else %}
+        <span class="px-3 py-1 rounded-lg border border-slate-200 bg-slate-50 text-slate-400 text-sm cursor-not-allowed">
+          ← Prev
+        </span>
+        {% endif %}
+        
+        {% for num in forecasts_list.paginator.page_range %}
+          {% if num == forecasts_list.number %}
+            <span class="px-3 py-1 rounded-lg bg-blue-600 text-white text-sm font-semibold">{{ num }}</span>
+          {% elif num > forecasts_list.number|add:'-3' and num < forecasts_list.number|add:'3' %}
+            <a href="?tab=forecast&page={{ num }}{% if fcustomer %}&fcustomer={{ fcustomer }}{% endif %}{% if fq %}&fq={{ fq }}{% endif %}" 
+               class="px-3 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-sm">
+              {{ num }}
+            </a>
+          {% endif %}
+        {% endfor %}
+        
+        {% if forecasts_list.has_next %}
+        <a href="?tab=forecast&page={{ forecasts_list.next_page_number }}{% if fcustomer %}&fcustomer={{ fcustomer }}{% endif %}{% if fq %}&fq={{ fq }}{% endif %}" 
+           class="px-3 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-sm">
+          Next →
+        </a>
+        {% else %}
+        <span class="px-3 py-1 rounded-lg border border-slate-200 bg-slate-50 text-slate-400 text-sm cursor-not-allowed">
+          Next →
+        </span>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+        </div>
+  {% endif %}
+
+  {% if tab == "previous_forecast" %}
+
+        <div class="grid grid-cols-1 gap-6">
+          <div class="forecast-panel-card">
+    <div class="forecast-panel-header">
+      <div class="forecast-filters">
+        <div>
+          <h2 class="text-lg font-semibold text-slate-900">Previous Forecast Details</h2>
+          <p class="text-sm text-slate-500">{{ fs_prev_year|default:"Previous Year" }} monthly forecast by part number</p>
+        </div>
+
+        <form method="get" class="flex flex-wrap gap-2 items-center">
+          <input type="hidden" name="tab" value="previous_forecast">
+          <select name="pf_customer"
+                  class="h-10 px-3 rounded-xl border border-slate-300 bg-white text-sm text-slate-700
+                         focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">All Customers</option>
+            {% for c in prev_customers %}
+              <option value="{{ c }}" {% if pf_customer == c %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+          <input type="text" name="pf_q" value="{{ pf_q|default:'' }}"
+                 placeholder="Search part number / name…"
+                 class="h-10 px-3 w-60 max-w-full rounded-xl border border-slate-300 bg-white text-sm text-slate-700
+                        focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <button type="submit"
+                  class="h-10 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm">
+            Filter
+          </button>
+          <a href="?tab=previous_forecast"
+             class="h-10 px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-sm flex items-center">
+            Reset
+          </a>
+        </form>
+      </div>
+    </div>
+
+    <div class="forecast-panel-body">
+      <div class="fs-table-wrap">
+        <table class="fs-table">
+        <thead>
+          <!-- Row 1: Main header for PREVIOUS FORECAST -->
+          <tr>
+            <!-- Fixed left columns -->
+            <th class="fs-col-header " style="min-width:140px; padding: 8px 6px;">CUSTOMER</th>
+            <th class="fs-col-header " style="min-width:130px; padding: 8px 6px;">PART NUMBER</th>
+            <th class="fs-col-header" style="min-width:140px; padding: 8px 6px;">PART NAME</th>
+            <th class="fs-col-header" style="min-width:70px; padding: 8px 6px;">UNIT PRICE</th>
+
+            <!-- PREVIOUS FORECAST header -->
+            <th class="fs-section-prev" colspan="{{ fs_prev_months|length }}" style="padding: 8px 4px;">
+              PREVIOUS FORECAST ({{ fs_prev_year|default:"Previous Year" }})
+            </th>
+          </tr>
+
+          <!-- Row 2: Month columns -->
+          <tr>
+            <!-- Fixed left columns (empty cells for alignment) -->
+            <th class="fs-col-header " style="padding: 6px 4px;"></th>
+            <th class="fs-col-header " style="padding: 6px 4px;"></th>
+            <th class="fs-col-header" style="padding: 6px 4px;"></th>
+            <th class="fs-col-header" style="padding: 6px 4px;"></th>
+
+            <!-- Previous Forecast Months (JAN–DEC) -->
+            {% for month in fs_prev_months %}
+              <th
+                class="fs-col-header prev-month"
+                style="padding: 6px 4px; min-width:45px;"
+              >
+                {{ month }}
+              </th>
+            {% endfor %}
+          </tr>
+        </thead>
+
+        <tbody>
+          {% for row in prev_rows %}
+          <tr class="data-row">
+            <td class="" style=" padding: 8px 6px; text-align: left;">{{ row.customer }}</td>
+            <td class=" font-mono" style=" padding: 8px 6px; text-align: left;">{{ row.part_number }}</td>
+            <td style="padding: 8px 6px; text-align: left;">{{ row.part_name }}</td>
+            <td style="padding: 8px 6px; text-align: right;">{{ row.unit_price|floatformat:4 }}</td>
+
+            <!-- Previous Forecast Months (JAN–DEC) -->
+            {% for month in fs_prev_months %}
+              <td style="padding: 8px 4px; text-align: center;">
+                {% with val=row.months|get_item:month %}
+                  {% if val %}{{ val|floatformat:0|intcomma }}{% else %}-{% endif %}
+                {% endwith %}
+              </td>
+            {% endfor %}
+          </tr>
+          {% empty %}
+          <tr>
+            <td colspan="16" class="px-6 py-12 text-center text-slate-400 text-sm">
+              No previous forecast records found.
+            </td>
+          </tr>
+          {% endfor %}
+
+          <!-- TOTAL QTY row -->
+          {% if prev_rows %}
+          <tr class="total-row">
+            <td class="" style=" "></td>
+            <td class="" style=" "></td>
+            <td class="text-left font-bold text-slate-700" style="padding: 8px 6px;">TOTAL QTY</td>
+            <td></td>
+
+            <!-- Previous Forecast Totals -->
+            {% for month in fs_prev_months %}
+              <td style="padding: 8px 4px; text-align: center;">
+                {{ prev_total_qty|get_item:month|default:"—"|intcomma }}
+              </td>
+            {% endfor %}
+          </tr>
+
+          <!-- TOTAL AMOUNT row -->
+          <tr class="total-amount-row">
+            <td class="" style=" "></td>
+            <td class="" style=" "></td>
+            <td class="text-left font-bold text-slate-700" style="padding: 8px 6px;">TOTAL AMOUNT</td>
+            <td></td>
+
+            <!-- Previous Forecast Amounts -->
+            {% for month in fs_prev_months %}
+              <td style="padding: 8px 4px; text-align: center;">
+                {{ prev_total_amt|get_item:month|default:"—"|floatformat:0|intcomma }}
+              </td>
+            {% endfor %}
+          </tr>
+          {% endif %}
+        </tbody>
+      </table>
+      </div>
+    </div>
+  </div>
+        </div>
+  {% endif %}
+
+  {% if tab == "forecast_summary" %}
+
+        <div class="grid grid-cols-1 gap-6">
+          <div class="forecast-panel-card">
+    <div class="forecast-panel-header">
+      <div class="forecast-filters">
+        <div>
+          <h2 class="text-lg font-semibold text-slate-900">Forecast Summary</h2>
+          <p class="text-sm text-slate-500">{{ fs_fore_year|default:"Current Year" }} monthly forecast by part number</p>
+        </div>
+
+        <form method="get" class="flex flex-wrap gap-2 items-center">
+          <input type="hidden" name="tab" value="forecast_summary">
+          <select name="fsq_customer"
+                  class="h-10 px-3 rounded-xl border border-slate-300 bg-white text-sm text-slate-700
+                         focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">All Customers</option>
+            {% for c in fs_customers %}
+              <option value="{{ c }}" {% if fsq_customer == c %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+          <input type="text" name="fsq" value="{{ fsq|default:'' }}"
+                 placeholder="Search part number / name…"
+                 class="h-10 px-3 w-60 max-w-full rounded-xl border border-slate-300 bg-white text-sm text-slate-700
+                        focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <button type="submit"
+                  class="h-10 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm">
+            Filter
+          </button>
+          <a href="?tab=forecast_summary"
+             class="h-10 px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-sm flex items-center">
+            Reset
+          </a>
+        </form>
+      </div>
+    </div>
+
+    <div class="forecast-panel-body">
+      <div class="fs-table-wrap">
+        <table class="fs-table">
+        <thead>
+          <!-- Row 1: Main header for FORECAST (Current Year) -->
+          <tr>
+            <!-- Fixed left columns -->
+            <th class="fs-col-header " style="min-width:140px; padding: 8px 6px;">CUSTOMER</th>
+            <th class="fs-col-header " style="min-width:130px; padding: 8px 6px;">PART NUMBER</th>
+            <th class="fs-col-header" style="min-width:140px; padding: 8px 6px;">PART NAME</th>
+            <th class="fs-col-header" style="min-width:70px; padding: 8px 6px;">UNIT PRICE</th>
+
+            <!-- FORECAST header -->
+            <th class="fs-section-fore" colspan="{{ fs_fore_months|length }}" style="padding: 8px 4px;">
+              FORECAST ({{ fs_fore_year|default:"Current Year" }})
+            </th>
+          </tr>
+
+          <!-- Row 2: Month columns -->
+          <tr>
+            <!-- Fixed left columns (empty cells for alignment) -->
+            <th class="fs-col-header " style="padding: 6px 4px;"></th>
+            <th class="fs-col-header " style="padding: 6px 4px;"></th>
+            <th class="fs-col-header" style="padding: 6px 4px;"></th>
+            <th class="fs-col-header" style="padding: 6px 4px;"></th>
+
+            <!-- Forecast Months (JAN–DEC) -->
+            {% for month in fs_fore_months %}
+              <th
+                class="fs-col-header fore-month"
+                style="padding: 6px 4px; min-width:45px;"
+              >
+                {{ month }}
+              </th>
+            {% endfor %}
+          </tr>
+        </thead>
+
+        <tbody>
+          {% for row in fs_rows %}
+          <tr class="data-row">
+            <td class="" style=" padding: 8px 6px; text-align: left;">{{ row.customer }}</td>
+            <td class=" font-mono" style=" padding: 8px 6px; text-align: left;">{{ row.part_number }}</td>
+            <td style="padding: 8px 6px; text-align: left;">{{ row.part_name }}</td>
+            <td style="padding: 8px 6px; text-align: right;">{{ row.unit_price|floatformat:4 }}</td>
+
+            <!-- Forecast Months (JAN–DEC) - Current Year Only -->
+            {% for month in fs_fore_months %}
+              <td style="padding: 8px 4px; text-align: center;">
+                {% with val=row.fore|get_item:month %}
+                  {% if val %}{{ val|floatformat:0|intcomma }}{% else %}0{% endif %}
+                {% endwith %}
+              </td>
+            {% endfor %}
+          </tr>
+          {% empty %}
+          <tr>
+            <td colspan="16" class="px-6 py-12 text-center text-slate-400 text-sm">
+              No forecast records found for {{ fs_fore_year|default:"current year" }}.
+            </td>
+          </tr>
+          {% endfor %}
+
+          <!-- TOTAL QTY row -->
+          {% if fs_rows %}
+          <tr class="total-row">
+            <td class="" style=" "></td>
+            <td class="" style=" "></td>
+            <td class="text-left font-bold text-slate-700" style="padding: 8px 6px;">TOTAL QTY</td>
+            <td></td>
+
+            <!-- Forecast Totals - Current Year Only -->
+            {% for month in fs_fore_months %}
+              <td style="padding: 8px 4px; text-align: center;">
+                {{ fs_total_fore_qty|get_item:month|default:"—"|intcomma }}
+              </td>
+            {% endfor %}
+          </tr>
+
+          <!-- TOTAL AMOUNT row -->
+          <tr class="total-amount-row">
+            <td class="" style=" "></td>
+            <td class="" style=" "></td>
+            <td class="text-left font-bold text-slate-700" style="padding: 8px 6px;">TOTAL AMOUNT</td>
+            <td></td>
+
+            <!-- Forecast Amounts - Current Year Only -->
+            {% for month in fs_fore_months %}
+              <td style="padding: 8px 4px; text-align: center;">
+                {{ fs_total_fore_amt|get_item:month|default:"—"|floatformat:0|intcomma }}
+              </td>
+            {% endfor %}
+          </tr>
+          {% endif %}
+        </tbody>
+      </table>
+      </div>
+    </div>
+  </div>
+        </div>
+  {% endif %}
+
+  {% if tab == "actual_delivered" %}
+
+        <div class="grid grid-cols-1 gap-6">
+          <div class="forecast-panel-card">
+    <div class="forecast-panel-header">
+      <div class="forecast-filters">
+        <div>
+          <h2 class="text-lg font-semibold text-slate-900">Actual Delivered</h2>
+          <p class="text-sm text-slate-500">{{ ad_year|default:"Current Year" }} actual delivered by part number</p>
+        </div>
+
+        <form method="get" class="flex flex-wrap gap-2 items-center">
+          <input type="hidden" name="tab" value="actual_delivered">
+          <select name="ad_customer"
+                  class="h-10 px-3 rounded-xl border border-slate-300 bg-white text-sm text-slate-700
+                         focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">All Customers</option>
+            {% for c in ad_customers %}
+              <option value="{{ c }}" {% if ad_customer == c %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+          <input type="text" name="ad_q" value="{{ ad_q|default:'' }}"
+                 placeholder="Search part number / name…"
+                 class="h-10 px-3 w-60 max-w-full rounded-xl border border-slate-300 bg-white text-sm text-slate-700
+                        focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <button type="submit"
+                  class="h-10 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm">
+            Filter
+          </button>
+          <a href="?tab=actual_delivered"
+             class="h-10 px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-sm flex items-center">
+            Reset
+          </a>
+        </form>
+      </div>
+    </div>
+
+    <div class="forecast-panel-body">
+      <div class="fs-table-wrap">
+        <table class="fs-table">
+        <thead>
+          <tr>
+            <th class="fs-col-header " style="min-width:140px; padding: 8px 6px;">CUSTOMER</th>
+            <th class="fs-col-header " style="min-width:130px; padding: 8px 6px;">PART NUMBER</th>
+            <th class="fs-col-header" style="min-width:140px; padding: 8px 6px;">PART NAME</th>
+            <th class="fs-col-header" style="min-width:70px; padding: 8px 6px;">UNIT PRICE</th>
+
+            <th class="fs-section-prev" colspan="{{ ad_months|length }}" style="padding: 8px 4px;">
+              ACTUAL DELIVERED ({{ ad_year|default:"Current Year" }})
+            </th>
+          </tr>
+
+          <tr>
+            <th class="fs-col-header " style="padding: 6px 4px;"></th>
+            <th class="fs-col-header " style="padding: 6px 4px;"></th>
+            <th class="fs-col-header" style="padding: 6px 4px;"></th>
+            <th class="fs-col-header" style="padding: 6px 4px;"></th>
+
+            {% for month in ad_months %}
+              <th
+                class="fs-col-header prev-month"
+                style="padding: 6px 4px; min-width:45px;"
+              >
+                {{ month }}
+              </th>
+            {% endfor %}
+          </tr>
+        </thead>
+
+        <tbody>
+          {% for row in ad_rows %}
+          <tr class="data-row">
+            <td class="" style=" padding: 8px 6px; text-align: left;">{{ row.customer }}</td>
+            <td class=" font-mono" style=" padding: 8px 6px; text-align: left;">{{ row.part_number }}</td>
+            <td style="padding: 8px 6px; text-align: left;">{{ row.part_name }}</td>
+            <td style="padding: 8px 6px; text-align: right;">{{ row.unit_price|floatformat:4 }}</td>
+
+            {% for month in ad_months %}
+              <td style="padding: 8px 4px; text-align: center;">
+                {% with val=row.months|get_item:month %}
+                  {% if val %}{{ val|floatformat:0|intcomma }}{% else %}-{% endif %}
+                {% endwith %}
+              </td>
+            {% endfor %}
+          </tr>
+          {% empty %}
+          <tr>
+            <td colspan="16" class="px-6 py-12 text-center text-slate-400 text-sm">
+              No actual delivered records found.
+            </td>
+          </tr>
+          {% endfor %}
+
+          {% if ad_rows %}
+          <tr class="total-row">
+            <td class="" style=" "></td>
+            <td class="" style=" "></td>
+            <td class="text-left font-bold text-slate-700" style="padding: 8px 6px;">TOTAL QTY</td>
+            <td></td>
+
+            {% for month in ad_months %}
+              <td style="padding: 8px 4px; text-align: center;">
+                {{ ad_total_qty|get_item:month|default:"—"|intcomma }}
+              </td>
+            {% endfor %}
+          </tr>
+
+          <tr class="total-amount-row">
+            <td class="" style=" "></td>
+            <td class="" style=" "></td>
+            <td class="text-left font-bold text-slate-700" style="padding: 8px 6px;">TOTAL AMOUNT</td>
+            <td></td>
+
+            {% for month in ad_months %}
+              <td style="padding: 8px 4px; text-align: center;">
+                {{ ad_total_amt|get_item:month|default:"—"|floatformat:0|intcomma }}
+              </td>
+            {% endfor %}
+          </tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+
+    </div>
+  </div>
+
+  <!-- Edit Forecast Panel -->
+  <div id="edit-forecast-backdrop" class="hidden fixed inset-0 bg-black/50 z-40"></div>
+
+  <div id="edit-forecast-panel"
+       class="fixed top-0 right-0 h-full w-full sm:w-[500px]
+              bg-white text-slate-900 border-l border-slate-200 z-50
+              translate-x-full transition-transform duration-200 flex flex-col">
+
+    <div class="p-4 border-b border-slate-200 flex justify-between items-center">
+      <div>
+        <div class="font-semibold text-blue-700">Edit Forecast</div>
+        <div class="text-xs text-slate-500">Update forecast record</div>
+      </div>
+      <button id="edit-forecast-close"
+              class="px-3 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-200">
+        Close
+      </button>
+    </div>
+
+    <div id="edit-forecast-content" class="flex-1 overflow-y-auto p-6">
+      <form method="post" action="{% url 'app:admin_dashboard' %}" class="space-y-5" id="edit-forecast-form">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="update_forecast">
+        <input type="hidden" name="original_customer_name" id="edit-original-customer" value="">
+        <input type="hidden" name="original_part_number" id="edit-original-part-number" value="">
+        <input type="hidden" name="original_date" id="edit-original-date" value="">
+
+        <div>
+          <label class="text-sm font-medium text-slate-700">Customer Name</label>
+          <input type="text" name="customer_name" id="edit-customer-name" required
+                 class="mt-1 w-full px-3 py-2 rounded-xl border border-slate-300 bg-white
+                        focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                 placeholder="Enter customer name">
+        </div>
+
+        <div>
+          <label class="text-sm font-medium text-slate-700">Part Name</label>
+          <input type="text" name="part_name" id="edit-part-name" required
+                 class="mt-1 w-full px-3 py-2 rounded-xl border border-slate-300 bg-white
+                        focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                 placeholder="Enter part name">
+        </div>
+
+        <div>
+          <label class="text-sm font-medium text-slate-700">Part Number</label>
+          <input type="text" name="part_number" id="edit-part-number" required
+                 class="mt-1 w-full px-3 py-2 rounded-xl border border-slate-300 bg-white
+                        focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                 placeholder="Enter part number">
+        </div>
+
+        <div>
+          <label class="text-sm font-medium text-slate-700">Month/Year</label>
+          <div class="grid grid-cols-2 gap-3">
+            <select name="month" id="edit-month"
+                    class="px-3 py-2 rounded-xl border border-slate-300 bg-white
+                           focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+              <option value="">Keep existing month</option>
+              <option value="January">January</option>
+              <option value="February">February</option>
+              <option value="March">March</option>
+              <option value="April">April</option>
+              <option value="May">May</option>
+              <option value="June">June</option>
+              <option value="July">July</option>
+              <option value="August">August</option>
+              <option value="September">September</option>
+              <option value="October">October</option>
+              <option value="November">November</option>
+              <option value="December">December</option>
+            </select>
+            <select name="year" id="edit-year"
+                    class="px-3 py-2 rounded-xl border border-slate-300 bg-white
+                           focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+              <option value="">Keep existing year</option>
+              <option value="2024">2024</option>
+              <option value="2025">2025</option>
+              <option value="2026">2026</option>
+              <option value="2027">2027</option>
+              <option value="2028">2028</option>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label class="text-sm font-medium text-slate-700">Unit Price</label>
+          <input type="number" name="unit_price" id="edit-unit-price" step="any" min="0" required
+                 class="mt-1 w-full px-3 py-2 rounded-xl border border-slate-300 bg-white
+                        focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                 placeholder="0.00">
+        </div>
+
+        <div>
+          <label class="text-sm font-medium text-slate-700">Quantity</label>
+          <input type="number" name="quantity" id="edit-quantity" min="1" required
+                 class="mt-1 w-full px-3 py-2 rounded-xl border border-slate-300 bg-white
+                        focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                 placeholder="Enter quantity">
+        </div>
+
+        <div class="pt-4 border-t border-slate-200 flex justify-end gap-2">
+          <button type="button" id="edit-forecast-cancel"
+                  class="px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50">
+            Cancel
+          </button>
+          <button type="submit"
+                  class="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white">
+            Update Forecast
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <script>
     // Edit Forecast Panel JavaScript
@@ -3688,6 +3907,164 @@ if (panelContent) {
       });
     }
   </script>
+  <script>
+document.addEventListener("DOMContentLoaded", function () {
+  const partInput = document.getElementById("forecast-run-part-code");
+  const monthInput = document.getElementById("forecast-run-month");
+  const qtyInput = document.getElementById("forecast-run-qty");
 
+  const bomCount = document.getElementById("forecast-bom-count");
+  const bomStatus = document.getElementById("forecast-bom-status");
+  const bomWrap = document.getElementById("forecast-bom-wrap");
+  const bomBody = document.getElementById("forecast-bom-body");
+
+  function setBomIdle(message) {
+    if (bomCount) bomCount.textContent = "0 materials";
+    if (bomStatus) {
+      bomStatus.textContent = message || "Type a part code to load its registered BOM materials.";
+      bomStatus.classList.remove("hidden");
+    }
+    if (bomWrap) bomWrap.classList.add("hidden");
+    if (bomBody) bomBody.innerHTML = "";
+  }
+
+  function renderBomRows(rows) {
+    if (!bomBody || !bomWrap || !bomStatus || !bomCount) return;
+
+    if (!Array.isArray(rows) || rows.length === 0) {
+      setBomIdle("No registered BOM materials found for this part code.");
+      return;
+    }
+
+    bomCount.textContent = `${rows.length} material${rows.length === 1 ? "" : "s"}`;
+    bomStatus.classList.add("hidden");
+    bomWrap.classList.remove("hidden");
+
+    bomBody.innerHTML = rows.map((row) => {
+      const matCode = row.mat_partcode || row.material_code || "—";
+      const matName = row.mat_partname || row.material_name || "—";
+      const dimQty = row.dim_qty ?? row.per_unit_qty ?? "—";
+      const loss = row.loss_percent ?? row.loss_pct ?? "—";
+      const total = row.total ?? row.per_unit_total ?? "—";
+      const unit = row.unit || "—";
+
+      return `
+        <tr>
+          <td class="px-4 py-3 font-medium text-slate-900">${escapeHtml(String(matCode))}</td>
+          <td class="px-4 py-3 text-slate-700">${escapeHtml(String(matName))}</td>
+          <td class="px-4 py-3 text-right text-slate-700 tabular-nums">${escapeHtml(String(dimQty))}</td>
+          <td class="px-4 py-3 text-right text-slate-700 tabular-nums">${escapeHtml(String(loss))}</td>
+          <td class="px-4 py-3 text-right font-medium text-slate-900 tabular-nums">${escapeHtml(String(total))}</td>
+          <td class="px-4 py-3 text-slate-700">${escapeHtml(String(unit))}</td>
+        </tr>
+      `;
+    }).join("");
+  }
+
+  function escapeHtml(value) {
+    return value
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
+  async function loadForecastQty() {
+    if (!partInput || !monthInput || !qtyInput) return;
+
+    const part = partInput.value.trim();
+    const month = monthInput.value.trim();
+
+    if (!part || !month) return;
+
+    const url = `/api/forecast-qty/?part_number=${encodeURIComponent(part)}&schedule_month=${encodeURIComponent(month)}`;
+
+    try {
+      const res = await fetch(url, {
+        headers: { "X-Requested-With": "XMLHttpRequest" }
+      });
+      const data = await res.json();
+
+      if (data.ok) {
+        qtyInput.value = data.quantity || 0;
+      }
+    } catch (e) {
+      console.log("forecast lookup failed", e);
+    }
+  }
+
+  async function loadBomPreview() {
+    if (!partInput) return;
+
+    const part = partInput.value.trim();
+    if (!part) {
+      setBomIdle("Type a part code to load its registered BOM materials.");
+      return;
+    }
+
+    if (bomStatus) {
+      bomStatus.textContent = "Loading registered BOM materials…";
+      bomStatus.classList.remove("hidden");
+    }
+    if (bomWrap) bomWrap.classList.add("hidden");
+    if (bomBody) bomBody.innerHTML = "";
+    if (bomCount) bomCount.textContent = "Loading…";
+
+    const urls = [
+      `/api/part-bom/?part_code=${encodeURIComponent(part)}`,
+      `/api/part-bom/?part_number=${encodeURIComponent(part)}`,
+    ];
+
+    let data = null;
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, {
+          headers: { "X-Requested-With": "XMLHttpRequest" }
+        });
+        data = await res.json();
+        if (data) break;
+      } catch (e) {
+        console.log("bom lookup failed", e);
+      }
+    }
+
+    if (!data || data.ok === false) {
+      setBomIdle((data && data.message) ? data.message : "No registered BOM materials found for this part code.");
+      return;
+    }
+
+    const rows = data.rows || data.materials || data.items || [];
+    renderBomRows(rows);
+  }
+
+  let bomTimer = null;
+
+  if (partInput) {
+    partInput.addEventListener("input", function () {
+      clearTimeout(bomTimer);
+      bomTimer = setTimeout(() => {
+        loadBomPreview();
+      }, 250);
+    });
+
+    partInput.addEventListener("change", function () {
+      loadBomPreview();
+      loadForecastQty();
+    });
+
+    partInput.addEventListener("blur", function () {
+      loadBomPreview();
+      loadForecastQty();
+    });
+  }
+
+  if (monthInput) {
+    monthInput.addEventListener("change", loadForecastQty);
+  }
+
+  setBomIdle("Type a part code to load its registered BOM materials.");
+});
+</script>
 </body>
-                      
+</html>       
