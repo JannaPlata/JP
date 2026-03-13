@@ -80,10 +80,10 @@
             <td class="p-3">{{ m.mat_partcode }}</td>
             <td class="p-3">{{ m.mat_partname }}</td>
             <td class="p-3">{{ m.mat_maker|default:"—" }}</td>
-            <td class="p-3">{{ m.dim_qty }}</td>
+            <td class="p-3">{{ m.dim_qty|floatformat:"-3" }}</td>
             <td class="p-3">{{ m.unit|default:"—" }}</td>
-            <td class="p-3">{{ m.loss_percent }}</td>
-            <td class="p-3 text-right">{{ m.total }}</td>
+            <td class="p-3">{{ m.loss_percent|floatformat:"0" }}</td>
+            <td class="p-3 text-right">{{ m.total|floatformat:"-3" }}</td>
           </tr>
           {% empty %}
           <tr>

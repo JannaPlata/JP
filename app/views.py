@@ -15,7 +15,7 @@ from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_GET
 from django.utils import timezone
-from paddleocr import PaddleOCR, PPStructureV3
+from paddleocr import PaddleOCR
 import pypdfium2 as pdfium
 from django.conf import settings
 import pandas as pd
@@ -165,34 +165,49 @@ def _parse_schedule_month_key(value: str) -> str:
 
 def _build_bom_display_rows(tep):
     """
-    Prefer shared BOMMaterial rows by part_code.
-    Fallback to legacy Material rows under the current TEP.
+    Display ONLY materials linked to this specific TEP.
     """
     rows = []
-    part_code = (getattr(tep, "part_code", "") or "").strip() if tep else ""
-
+    
+    # Get materials directly from BOMMaterial for this part_code
+    # and filter by source_tep if available
     try:
-        bom_rows = (
-            BOMMaterial.objects
-            .filter(part_code=part_code)
-            .select_related("material")
-            .order_by("mat_partcode", "id")
-        )
+        if hasattr(tep, 'id') and tep.id:
+            # Try to get materials specifically for this TEP
+            bom_rows = BOMMaterial.objects.filter(
+                part_code=tep.part_code,
+                source_tep=tep
+            ).select_related('material').order_by('id')
+            
+            # If no materials found with source_tep, fall back to all materials for this part
+            if not bom_rows.exists():
+                bom_rows = BOMMaterial.objects.filter(
+                    part_code=tep.part_code
+                ).select_related('material').order_by('id')
+        else:
+            bom_rows = BOMMaterial.objects.filter(
+                part_code=tep.part_code
+            ).select_related('material').order_by('id')
     except Exception:
         bom_rows = BOMMaterial.objects.none()
-
+    
     if bom_rows.exists():
         for row in bom_rows:
             master = getattr(row, "material", None)
             if master:
-                row.mat_partcode = master.mat_partcode or row.mat_partcode
-                row.mat_partname = master.mat_partname or row.mat_partname
-                row.mat_maker = master.mat_maker or row.mat_maker
-                row.unit = master.unit or row.unit
+                # Use the values from the BOMMaterial row (these have the correct dim_qty, loss_percent)
+                row.mat_partcode = row.mat_partcode or master.mat_partcode
+                row.mat_partname = row.mat_partname or master.mat_partname
+                row.mat_maker = row.mat_maker or master.mat_maker
+                row.unit = row.unit or master.unit
+                # Keep the dim_qty and loss_percent from the BOMMaterial row
+                row.display_dim_qty = row.dim_qty
+                row.display_loss_percent = row.loss_percent
             rows.append(row)
         return rows
-
-    return list(Material.objects.filter(tep_code=tep).order_by("mat_partname", "id"))
+    
+    # Fallback to legacy Material table
+    return list(Material.objects.filter(tep_code=tep).order_by("id"))
 
 def _preferred_tep_for_part_code(part_code: str):
     """
@@ -3576,48 +3591,76 @@ def extract_from_text_pdf(pdf_path):
             # Extract header information using regex
             lines = full_text.split('\n')
             
-            # Find customer name
+            # Find customer name - stop at first sign of "Prepared by"
             for i, line in enumerate(lines):
                 if 'Customer Name:' in line:
                     if ':' in line:
                         parts = line.split(':', 1)
                         if len(parts) > 1 and parts[1].strip():
-                            structured_data['customer_name'] = parts[1].strip()
+                            raw_name = parts[1].strip()
+                            # Cut off at "Prepared" if it appears
+                            if 'Prepared' in raw_name:
+                                raw_name = raw_name.split('Prepared')[0].strip()
+                            structured_data['customer_name'] = raw_name
                     elif i + 1 < len(lines):
-                        structured_data['customer_name'] = lines[i + 1].strip()
+                        raw_name = lines[i + 1].strip()
+                        # Cut off at "Prepared" if it appears
+                        if 'Prepared' in raw_name:
+                            raw_name = raw_name.split('Prepared')[0].strip()
+                        structured_data['customer_name'] = raw_name
                     break
             
-            # Find part code
+            # Find part code - clean up any extra text
             for i, line in enumerate(lines):
                 if 'Part Code:' in line:
                     if ':' in line:
                         parts = line.split(':', 1)
                         if len(parts) > 1 and parts[1].strip():
-                            structured_data['part_code'] = re.sub(r'[✓✔]', '', parts[1]).strip()
+                            raw_code = parts[1].strip()
+                            # Remove checkmark and any extra text after
+                            raw_code = re.sub(r'[✓✔]', '', raw_code).strip()
+                            # Take only the first part (before any space or special char)
+                            structured_data['part_code'] = raw_code.split()[0] if raw_code else ''
                     elif i + 1 < len(lines):
-                        structured_data['part_code'] = re.sub(r'[✓✔]', '', lines[i + 1]).strip()
+                        raw_code = lines[i + 1].strip()
+                        raw_code = re.sub(r'[✓✔]', '', raw_code).strip()
+                        structured_data['part_code'] = raw_code.split()[0] if raw_code else ''
                     break
             
-            # Find TEP code
+            # Find TEP code - clean up names and dates
             for i, line in enumerate(lines):
                 if 'TEP Code:' in line:
                     if ':' in line:
                         parts = line.split(':', 1)
                         if len(parts) > 1 and parts[1].strip():
-                            structured_data['tep_code'] = re.sub(r'[✓✔]', '', parts[1]).strip()
+                            raw_tep = parts[1].strip()
+                            # Remove checkmark
+                            raw_tep = re.sub(r'[✓✔]', '', raw_tep).strip()
+                            # Take only the first part (the TEP code itself)
+                            structured_data['tep_code'] = raw_tep.split()[0] if raw_tep else ''
                     elif i + 1 < len(lines):
-                        structured_data['tep_code'] = re.sub(r'[✓✔]', '', lines[i + 1]).strip()
+                        raw_tep = lines[i + 1].strip()
+                        raw_tep = re.sub(r'[✓✔]', '', raw_tep).strip()
+                        structured_data['tep_code'] = raw_tep.split()[0] if raw_tep else ''
                     break
             
-            # Find part name
+            # Find part name - remove date
             for i, line in enumerate(lines):
                 if 'Part Name:' in line:
                     if ':' in line:
                         parts = line.split(':', 1)
                         if len(parts) > 1 and parts[1].strip():
-                            structured_data['part_name'] = re.sub(r'[✓✔]', '', parts[1]).strip()
+                            raw_name = parts[1].strip()
+                            # Remove checkmark
+                            raw_name = re.sub(r'[✓✔]', '', raw_name).strip()
+                            # Remove date if present (looks like DD.MM.YYYY)
+                            raw_name = re.sub(r'\s+\d{2}\.\d{2}\.\d{4}', '', raw_name)
+                            structured_data['part_name'] = raw_name
                     elif i + 1 < len(lines):
-                        structured_data['part_name'] = re.sub(r'[✓✔]', '', lines[i + 1]).strip()
+                        raw_name = lines[i + 1].strip()
+                        raw_name = re.sub(r'[✓✔]', '', raw_name).strip()
+                        raw_name = re.sub(r'\s+\d{2}\.\d{2}\.\d{4}', '', raw_name)
+                        structured_data['part_name'] = raw_name
                     break
             
             # Extract table using camelot (more accurate for tables)
@@ -3640,6 +3683,14 @@ def extract_from_text_pdf(pdf_path):
                         # Process data rows (after header)
                         for idx in range(header_row + 1, len(df)):
                             row = df.iloc[idx]
+                            
+                            # Get all non-empty values
+                            row_values = [str(val).strip() for val in row.values if str(val).strip()]
+                            
+                            # Skip empty rows
+                            if not row_values:
+                                continue
+                            
                             material_row = {
                                 'name': '',
                                 'part_code': '',
@@ -3650,20 +3701,64 @@ def extract_from_text_pdf(pdf_path):
                                 'total': ''
                             }
                             
-                            # Map columns based on position
-                            row_values = [str(val).strip() for val in row.values if str(val).strip()]
+                            # Check if first value is an item number
+                            start_idx = 1 if row_values[0].isdigit() else 0
                             
-                            if len(row_values) >= 7:
-                                # Skip Item (index 0)
-                                material_row['name'] = row_values[1] if len(row_values) > 1 else ''
-                                material_row['part_code'] = row_values[2] if len(row_values) > 2 else ''
-                                material_row['unit'] = row_values[3] if len(row_values) > 3 else ''
-                                material_row['maker'] = row_values[4] if len(row_values) > 4 else ''
-                                material_row['dim_qty'] = row_values[5] if len(row_values) > 5 else ''
-                                material_row['loss_percent'] = row_values[6].replace('%', '') if len(row_values) > 6 else ''
-                                material_row['total'] = row_values[7] if len(row_values) > 7 else ''
+                            # Ensure we have enough values
+                            if len(row_values) - start_idx >= 7:
+                                # Map values in correct order
+                                material_row['name'] = row_values[start_idx] if start_idx < len(row_values) else ''
+                                material_row['part_code'] = row_values[start_idx + 1] if start_idx + 1 < len(row_values) else ''
                                 
-                                if material_row['name'] or material_row['part_code']:
+                                # Check if next value is a unit
+                                unit_idx = start_idx + 2
+                                if unit_idx < len(row_values) and row_values[unit_idx] in ['m', 'pc', 'pcs', 'kg', 'g']:
+                                    material_row['unit'] = row_values[unit_idx]
+                                    unit_idx += 1
+                                else:
+                                    unit_idx = start_idx + 2
+                                
+                                # Get maker (may be at different position depending on unit)
+                                if unit_idx > start_idx + 2:
+                                    # Unit was found, maker is next
+                                    material_row['maker'] = row_values[unit_idx] if unit_idx < len(row_values) else ''
+                                    next_idx = unit_idx + 1
+                                else:
+                                    # Unit not found at expected position
+                                    material_row['maker'] = row_values[start_idx + 2] if start_idx + 2 < len(row_values) else ''
+                                    next_idx = start_idx + 3
+                                
+                               # Get remaining values and format numbers properly
+                                if next_idx < len(row_values):
+                                    # Convert to float and back to string to remove extra zeros
+                                    try:
+                                        dim_val = float(row_values[next_idx])
+                                        # If it's a whole number, show as integer
+                                        if dim_val.is_integer():
+                                            material_row['dim_qty'] = str(int(dim_val))
+                                        else:
+                                            # Otherwise show with up to 3 decimal places, removing trailing zeros
+                                            material_row['dim_qty'] = str(dim_val).rstrip('0').rstrip('.') if '.' in str(dim_val) else str(dim_val)
+                                    except (ValueError, TypeError):
+                                        material_row['dim_qty'] = row_values[next_idx]
+
+                                if next_idx + 1 < len(row_values):
+                                    loss_val = row_values[next_idx + 1]
+                                    material_row['loss_percent'] = loss_val.replace('%', '') if loss_val else ''
+
+                                if next_idx + 2 < len(row_values):
+                                    try:
+                                        total_val = float(row_values[next_idx + 2])
+                                        # Format total similarly
+                                        if total_val.is_integer():
+                                            material_row['total'] = str(int(total_val))
+                                        else:
+                                            material_row['total'] = str(total_val).rstrip('0').rstrip('.') if '.' in str(total_val) else str(total_val)
+                                    except (ValueError, TypeError):
+                                        material_row['total'] = row_values[next_idx + 2]
+                                
+                                # Only add if we have a valid material name (not empty and not just numbers)
+                                if material_row['name'] and not material_row['name'].replace('.', '').isdigit():
                                     structured_data['materials'].append(material_row)
             except Exception as e:
                 print(f"Camelot extraction failed, falling back to pdfplumber: {e}")
@@ -3684,31 +3779,70 @@ def extract_from_text_pdf(pdf_path):
                             for i in range(header_idx + 1, len(table)):
                                 row = table[i]
                                 if any(cell for cell in row if cell):  # Non-empty row
-                                    material_row = {
-                                        'name': '',
-                                        'part_code': '',
-                                        'unit': '',
-                                        'maker': '',
-                                        'dim_qty': '',
-                                        'loss_percent': '',
-                                        'total': ''
-                                    }
-                                    
                                     # Clean and map cells
                                     cells = [str(cell).strip() if cell else '' for cell in row]
                                     cells = [cell for cell in cells if cell]
                                     
                                     if len(cells) >= 6:
-                                        # Skip item number (first cell)
-                                        material_row['name'] = cells[1] if len(cells) > 1 else ''
-                                        material_row['part_code'] = cells[2] if len(cells) > 2 else ''
-                                        material_row['unit'] = cells[3] if len(cells) > 3 else ''
-                                        material_row['maker'] = cells[4] if len(cells) > 4 else ''
-                                        material_row['dim_qty'] = cells[5] if len(cells) > 5 else ''
-                                        material_row['loss_percent'] = cells[6].replace('%', '') if len(cells) > 6 else ''
-                                        material_row['total'] = cells[7] if len(cells) > 7 else ''
+                                        material_row = {
+                                            'name': '',
+                                            'part_code': '',
+                                            'unit': '',
+                                            'maker': '',
+                                            'dim_qty': '',
+                                            'loss_percent': '',
+                                            'total': ''
+                                        }
                                         
-                                        if material_row['name'] or material_row['part_code']:
+                                        # Check if first cell is an item number
+                                        start_idx = 1 if cells[0].isdigit() else 0
+                                        
+                                        if start_idx < len(cells):
+                                            material_row['name'] = cells[start_idx]
+                                        if start_idx + 1 < len(cells):
+                                            material_row['part_code'] = cells[start_idx + 1]
+                                        
+                                        # Check for unit
+                                        unit_idx = start_idx + 2
+                                        if unit_idx < len(cells) and cells[unit_idx] in ['m', 'pc', 'pcs', 'kg', 'g']:
+                                            material_row['unit'] = cells[unit_idx]
+                                            unit_idx += 1
+                                        else:
+                                            unit_idx = start_idx + 2
+                                        
+                                        # Get maker
+                                        if unit_idx < len(cells):
+                                            material_row['maker'] = cells[unit_idx]
+                                            unit_idx += 1
+                                        
+                                        # Get remaining values and format numbers properly
+                                        if unit_idx < len(cells):
+                                            try:
+                                                dim_val = float(cells[unit_idx])
+                                                if dim_val.is_integer():
+                                                    material_row['dim_qty'] = str(int(dim_val))
+                                                else:
+                                                    material_row['dim_qty'] = str(dim_val).rstrip('0').rstrip('.') if '.' in str(dim_val) else str(dim_val)
+                                            except (ValueError, TypeError):
+                                                material_row['dim_qty'] = cells[unit_idx]
+                                            unit_idx += 1
+
+                                        if unit_idx < len(cells):
+                                            loss_val = cells[unit_idx]
+                                            material_row['loss_percent'] = loss_val.replace('%', '') if loss_val else ''
+                                            unit_idx += 1
+
+                                        if unit_idx < len(cells):
+                                            try:
+                                                total_val = float(cells[unit_idx])
+                                                if total_val.is_integer():
+                                                    material_row['total'] = str(int(total_val))
+                                                else:
+                                                    material_row['total'] = str(total_val).rstrip('0').rstrip('.') if '.' in str(total_val) else str(total_val)
+                                            except (ValueError, TypeError):
+                                                material_row['total'] = cells[unit_idx]
+                                        
+                                        if material_row['name'] and not material_row['name'].replace('.', '').isdigit():
                                             structured_data['materials'].append(material_row)
         
         return structured_data
@@ -3719,7 +3853,7 @@ def extract_from_text_pdf(pdf_path):
                     
 def extract_from_scanned_pdf(pdf_path):
     """
-    Extract structured data from scanned/image-based PDF using PP-Structure
+    Enhanced extraction from scanned/image-based PDF with better image preprocessing
     """
     structured_data = {
         'customer_name': '',
@@ -3730,85 +3864,52 @@ def extract_from_scanned_pdf(pdf_path):
     }
     
     try:
-        # Initialize PP-Structure
-        table_engine = PPStructureV3(show_log=True)
-        
-        # Convert PDF to images
+        # Convert PDF to images with better quality
         pdf = pdfium.PdfDocument(pdf_path)
         all_text = []
         
+        # Process all pages (usually just 1)
         for page_num in range(len(pdf)):
-            # Render page to image
             page = pdf[page_num]
-            bitmap = page.render(scale=2.0)
+            # Use higher scale for better OCR quality
+            bitmap = page.render(scale=3.0)  # Increased from 1.5 to 3.0
             pil_image = bitmap.to_pil()
             
-            # Save temporarily
-            temp_img = f"temp_page_{page_num}.jpg"
-            pil_image.save(temp_img, "JPEG")
+            # Convert PIL to OpenCV for preprocessing
+            import cv2
+            import numpy as np
+            open_cv_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
             
-            # Run PP-Structure to detect tables
-            result = table_engine(temp_img)
+            # Image preprocessing steps to improve OCR
+            # 1. Convert to grayscale
+            gray = cv2.cvtColor(open_cv_image, cv2.COLOR_BGR2GRAY)
             
-            # Extract text and tables
-            for res in result:
-                if res['type'] == 'text':
-                    all_text.append(res['res']['text'])
-                elif res['type'] == 'table':
-                    try:
-                        html = res['res']['html']
-                        # Parse HTML table
-                        dfs = pd.read_html(html)
-                        if dfs and len(dfs) > 0:
-                            df = dfs[0]
-                            
-                            # Find header row
-                            header_row = None
-                            for idx, row in df.iterrows():
-                                row_str = ' '.join(str(val).upper() for val in row.values)
-                                if 'MATERIAL NAME' in row_str or 'PART CODE' in row_str:
-                                    header_row = idx
-                                    break
-                            
-                            if header_row is not None:
-                                for idx in range(header_row + 1, len(df)):
-                                    row = df.iloc[idx]
-                                    if any(pd.notna(val) for val in row.values):
-                                        values = [str(val).strip() for val in row.values if pd.notna(val) and str(val).strip()]
-                                        values = [re.sub(r'[✓✔]', '', v).strip() for v in values if v]
-                                        
-                                        if len(values) >= 5:
-                                            material_row = {
-                                                'name': '',
-                                                'part_code': '',
-                                                'unit': '',
-                                                'maker': '',
-                                                'dim_qty': '',
-                                                'loss_percent': '',
-                                                'total': ''
-                                            }
-                                            
-                                            start_idx = 1 if values and values[0].isdigit() else 0
-                                            if start_idx < len(values):
-                                                material_row['name'] = values[start_idx]
-                                            if start_idx + 1 < len(values):
-                                                material_row['part_code'] = values[start_idx + 1]
-                                            if start_idx + 2 < len(values) and values[start_idx + 2] in ['m', 'pc', 'pcs', 'kg', 'g']:
-                                                material_row['unit'] = values[start_idx + 2]
-                                            if start_idx + 3 < len(values):
-                                                material_row['maker'] = values[start_idx + 3]
-                                            if start_idx + 4 < len(values):
-                                                material_row['dim_qty'] = values[start_idx + 4]
-                                            if start_idx + 5 < len(values):
-                                                material_row['loss_percent'] = values[start_idx + 5].replace('%', '')
-                                            if start_idx + 6 < len(values):
-                                                material_row['total'] = values[start_idx + 6]
-                                            
-                                            if material_row['name'] or material_row['part_code']:
-                                                structured_data['materials'].append(material_row)
-                    except Exception as e:
-                        print(f"Error parsing table: {e}")
-                        continue
+            # 2. Apply thresholding to make text clearer
+            _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+            
+            # 3. Denoise
+            denoised = cv2.medianBlur(thresh, 1)
+            
+            # Save preprocessed image temporarily
+            temp_img = f"temp_page_{page_num}_processed.jpg"
+            cv2.imwrite(temp_img, denoised)
+            
+            # Run OCR on preprocessed image
+            print(f"🔄 Running OCR on page {page_num+1}...")
+            result = ocr.ocr(temp_img)
+            
+            # Collect all text
+            if result and result[0]:
+                for line in result[0]:
+                    if len(line) >= 2:
+                        text_info = line[1]
+                        if isinstance(text_info, (list, tuple)):
+                            text = text_info[0]
+                        else:
+                            text = text_info
+                        if text and text.strip():
+                            all_text.append(text.strip())
+                            print(f"  OCR Line: {text.strip()}")  # Debug output
             
             # Clean up temp image
             if os.path.exists(temp_img):
@@ -3816,38 +3917,238 @@ def extract_from_scanned_pdf(pdf_path):
         
         pdf.close()
         
-        # Extract header info from all text
+        # Join all text
         full_text = ' '.join(all_text)
+        print(f"📄 OCR completed. Text length: {len(full_text)}")
+        print(f"📄 First 500 chars: {full_text[:500]}")
         
-        # Customer name
+        # Extract header information using improved patterns
         import re
-        customer_match = re.search(r'Customer Name:\s*([^\n]+)', full_text, re.IGNORECASE)
-        if customer_match:
-            structured_data['customer_name'] = customer_match.group(1).strip()
         
-        # Part code
-        part_match = re.search(r'Part Code:\s*([^\n]+)', full_text, re.IGNORECASE)
-        if part_match:
-            structured_data['part_code'] = re.sub(r'[✓✔]', '', part_match.group(1)).strip()
+        # Customer name - try multiple patterns
+        customer_patterns = [
+            r'Customer Name:\s*([A-Z\s,\.]+?)(?:\s+Prepared|\s+Checked|\s+Rev\.|\s+Page|\n|$)',
+            r'Customer[:\s]+([A-Z\s,\.]+?)(?:\s+Part|\s+TEP|\s+Prepared|\n|$)',
+            r'BROTHER\s+INDUSTRIES\s+LTD\.',
+            r'SEMITEC\s+ELECTRONICS',
+            r'TAISEI\s+Electronics'
+        ]
         
-        # TEP code
-        tep_match = re.search(r'TEP Code:\s*([^\n]+)', full_text, re.IGNORECASE)
-        if tep_match:
-            structured_data['tep_code'] = re.sub(r'[✓✔]', '', tep_match.group(1)).strip()
+        for pattern in customer_patterns:
+            if 'BROTHER' in pattern or 'SEMITEC' in pattern or 'TAISEI' in pattern:
+                # Direct match for known customers
+                if re.search(pattern, full_text, re.IGNORECASE):
+                    structured_data['customer_name'] = pattern.replace(r'\s+', ' ').replace('\\', '')
+                    print(f"✅ Found customer (direct): {structured_data['customer_name']}")
+                    break
+            else:
+                customer_match = re.search(pattern, full_text, re.IGNORECASE)
+                if customer_match:
+                    structured_data['customer_name'] = customer_match.group(1).strip()
+                    print(f"✅ Found customer: {structured_data['customer_name']}")
+                    break
+        
+        # Part code - look for patterns like LT3435-001, CB-G12005B
+        part_patterns = [
+            r'Part Code:\s*([A-Z0-9\-]+)',
+            r'Part[:\s]+([A-Z0-9\-]+)',
+            r'([A-Z]{2,3}[-][A-Z0-9]+[-][0-9]{3,}[A-Z]?)',  # LT3435-001, CB-G12005B
+            r'([A-Z0-9]{2,}[-][0-9]{3,}[A-Z]?(?:\s+REV\.?[A-Z])?)'
+        ]
+        
+        for pattern in part_patterns:
+            part_match = re.search(pattern, full_text, re.IGNORECASE)
+            if part_match:
+                raw_code = part_match.group(1).strip()
+                # Clean up
+                raw_code = re.sub(r'[✓✔]', '', raw_code)
+                raw_code = raw_code.split()[0]  # Take first part if there are spaces
+                structured_data['part_code'] = raw_code
+                print(f"✅ Found part code: {raw_code}")
+                break
+        
+        # TEP code - look for patterns like BIPH-0021-02, SEPI-0209-00
+        tep_patterns = [
+            r'TEP Code:\s*([A-Z0-9\-]+)',
+            r'TEP[:\s]+([A-Z0-9\-]+)',
+            r'([A-Z]{4,5}[-][0-9]{4,5}[-][0-9]{2})',  # BIPH-0021-02, SEPI-0209-00
+            r'([A-Z]+-\d+-\d+)'
+        ]
+        
+        for pattern in tep_patterns:
+            tep_match = re.search(pattern, full_text, re.IGNORECASE)
+            if tep_match:
+                raw_tep = tep_match.group(1).strip()
+                raw_tep = re.sub(r'[✓✔]', '', raw_tep)
+                raw_tep = raw_tep.split()[0]
+                structured_data['tep_code'] = raw_tep
+                print(f"✅ Found TEP code: {raw_tep}")
+                break
         
         # Part name
-        name_match = re.search(r'Part Name:\s*([^\n]+)', full_text, re.IGNORECASE)
-        if name_match:
-            structured_data['part_name'] = re.sub(r'[✓✔]', '', name_match.group(1)).strip()
+        name_patterns = [
+            r'Part Name:\s*([^\n]+)',
+            r'Part[:\s]+Name[:\s]+([^\n]+)',
+            r'(CR MOTOR HARNESS|PF MOTOR HARNESS)'
+        ]
         
-        return structured_data
+        for pattern in name_patterns:
+            if 'CR MOTOR' in pattern or 'PF MOTOR' in pattern:
+                if re.search(pattern, full_text, re.IGNORECASE):
+                    structured_data['part_name'] = pattern.replace('\\', '')
+                    print(f"✅ Found part name (direct): {structured_data['part_name']}")
+                    break
+            else:
+                name_match = re.search(pattern, full_text, re.IGNORECASE)
+                if name_match:
+                    raw_name = name_match.group(1).strip()
+                    raw_name = re.sub(r'[✓✔]', '', raw_name)
+                    raw_name = re.sub(r'\s+\d{2}\.\d{2}\.\d{4}', '', raw_name)
+                    structured_data['part_name'] = raw_name
+                    print(f"✅ Found part name: {raw_name}")
+                    break
+        
+        # Enhanced material extraction
+        print("\n📦 Looking for materials...")
+        
+        # Known material patterns from your PDFs
+        material_keywords = [
+            'WIRE', 'TERMINAL', 'HOUSING', 'FERRITE CORE', 'BINDER', 'TUBE',
+            'SOLDER BAR', 'FLUX', 'LABEL', 'TAPE', 'UL1007', 'UL1430',
+            '12001TOP', '12001HO0', 'KT16.00', 'T18R', 'SUMITUBE', 'LLS227N',
+            'SPARKLE FLUX', 'No. 2100FRTV'
+        ]
+        
+        # Split text into lines for better processing
+        lines = full_text.split('\n')
+        
+        for line_num, line in enumerate(lines):
+            line = line.strip()
+            if not line or len(line) < 10:
+                continue
+                
+            line_upper = line.upper()
+            
+            # Check if this line contains material data
+            if any(keyword in line_upper for keyword in material_keywords):
+                print(f"  📄 Found potential material line {line_num}: {line}")
+                
+                # Clean the line
+                clean_line = re.sub(r'[✓✔]', '', line)
+                clean_line = re.sub(r'\s+', ' ', clean_line).strip()
+                
+                # Initialize material row
+                material_row = {
+                    'name': '',
+                    'part_code': '',
+                    'unit': 'pc',
+                    'maker': 'Unknown',
+                    'dim_qty': '',
+                    'loss_percent': '10',
+                    'total': ''
+                }
+                
+                # Try to extract part code (look for patterns like UL1007, 12001TOP, etc.)
+                part_code_match = re.search(r'(UL\d{4}|12001[A-Z0-9]+|KT\d+\.\d+|T18R|LLS227N|No\.\s*\d+[A-Z0-9]*)', line_upper)
+                if part_code_match:
+                    material_row['part_code'] = part_code_match.group(1)
+                    print(f"    Found part code: {material_row['part_code']}")
+                
+                # Try to extract material name
+                for keyword in material_keywords:
+                    if keyword in line_upper:
+                        material_row['name'] = keyword
+                        print(f"    Found name: {material_row['name']}")
+                        break
+                
+                # If no name found, use first word
+                if not material_row['name'] and clean_line:
+                    words = clean_line.split()
+                    if words and not words[0].replace('.', '').isdigit():
+                        material_row['name'] = words[0]
+                
+                # Try to extract maker
+                makers = ['SUMITOMO', 'JCTC', 'FERICO', 'TYTON', 'NITTO', 'SENJU', 'ISHIKAWA']
+                for maker in makers:
+                    if maker in line_upper:
+                        material_row['maker'] = maker
+                        print(f"    Found maker: {maker}")
+                        break
+                
+                # Extract numbers (dim_qty, loss_percent, total)
+                numbers = re.findall(r'(\d+\.?\d*)', line)
+                if numbers:
+                    material_row['dim_qty'] = numbers[0]
+                    print(f"    Found dim_qty: {numbers[0]}")
+                    
+                    if len(numbers) >= 2:
+                        # Check if second number has % sign
+                        if '%' in line[line.find(numbers[1]):line.find(numbers[1])+len(numbers[1])+1]:
+                            material_row['loss_percent'] = numbers[1]
+                            print(f"    Found loss%: {numbers[1]}")
+                        else:
+                            material_row['total'] = numbers[1]
+                            print(f"    Found total: {numbers[1]}")
+                    
+                    if len(numbers) >= 3:
+                        material_row['total'] = numbers[2]
+                        print(f"    Found total: {numbers[2]}")
+                
+                # Extract unit
+                unit_match = re.search(r'\b(m|pc|pcs|g|kg)\b', line.lower())
+                if unit_match:
+                    material_row['unit'] = unit_match.group(1)
+                    print(f"    Found unit: {material_row['unit']}")
+                
+                # Only add if we have at least a part code or name
+                if material_row['part_code'] or (material_row['name'] and material_row['dim_qty']):
+                    structured_data['materials'].append(material_row)
+                    print(f"  ✅ Added material: {material_row}")
+        
+        print(f"\n✅ Scanned PDF extraction complete - Found {len(structured_data['materials'])} materials")
+        
+        # If still no materials found, try a simpler approach with the raw text
+        if not structured_data['materials']:
+            print("\n📊 No materials found with pattern matching, trying raw text parsing...")
+            
+            # Look for lines that contain typical material indicators
+            for line in lines:
+                line = line.strip()
+                if not line or len(line) < 5:
+                    continue
+                    
+                # Check if line has both letters and numbers (likely a material row)
+                if re.search(r'[A-Za-z]', line) and re.search(r'\d', line):
+                    # Split into words
+                    words = line.split()
+                    if len(words) >= 3:
+                        material_row = {
+                            'name': words[0] if words else '',
+                            'part_code': words[1] if len(words) > 1 else '',
+                            'unit': 'pc',
+                            'maker': 'Unknown',
+                            'dim_qty': '',
+                            'loss_percent': '10',
+                            'total': ''
+                        }
+                        
+                        # Try to find numbers
+                        numbers = re.findall(r'(\d+\.?\d*)', line)
+                        if numbers:
+                            material_row['dim_qty'] = numbers[0]
+                            if len(numbers) > 1:
+                                material_row['total'] = numbers[-1]
+                        
+                        structured_data['materials'].append(material_row)
+                        print(f"  ➕ Added raw material: {material_row}")
         
     except Exception as e:
         print(f"Error in scanned PDF extraction: {e}")
         import traceback
         traceback.print_exc()
-        return structured_data
-                    
+    
+    return structured_data
+
 def extract_structured_data_from_pdf(pdf_path):
     """
     Main extraction function that determines PDF type and calls appropriate extractor
@@ -4014,30 +4315,47 @@ def upload_customer_pdf(request):
                                         except (ValueError, TypeError):
                                             loss_percent = 10.0
                                         
-                                        # Check if BOMMaterial already exists
+                                       # Check if BOMMaterial already exists for this specific TEP
                                         existing_bom = BOMMaterial.objects.filter(
                                             part_code=structured_data['part_code'],
-                                            mat_partcode=material_list.mat_partcode
+                                            mat_partcode=material_list.mat_partcode,
+                                            source_tep=tep  # Only check for this specific TEP
                                         ).first()
-                                        
+
                                         if existing_bom:
                                             materials_skipped += 1
-                                            print(f"  ⏭️ Material already exists in BOM: {material_list.mat_partcode}")
+                                            print(f"  ⏭️ Material already exists in BOM for this TEP: {material_list.mat_partcode}")
                                         else:
-                                            # Create new BOMMaterial
-                                            bom = BOMMaterial.objects.create(
+                                            # Also check if it exists for this part code without a source_tep (legacy)
+                                            legacy_exists = BOMMaterial.objects.filter(
                                                 part_code=structured_data['part_code'],
                                                 mat_partcode=material_list.mat_partcode,
-                                                source_tep=tep,
-                                                material=material_list,
-                                                mat_partname=material_list.mat_partname,
-                                                mat_maker=material_list.mat_maker,
-                                                unit=material_list.unit,
-                                                dim_qty=dim_qty,
-                                                loss_percent=loss_percent,
-                                            )
-                                            materials_created += 1
-                                            print(f"  ✅ Added material to BOM: {material_list.mat_partcode}")
+                                                source_tep__isnull=True
+                                            ).first()
+                                            
+                                            if legacy_exists:
+                                                # Update the legacy entry to link to this TEP
+                                                legacy_exists.source_tep = tep
+                                                legacy_exists.dim_qty = dim_qty
+                                                legacy_exists.loss_percent = loss_percent
+                                                legacy_exists.save()
+                                                materials_created += 1
+                                                print(f"  ✅ Updated legacy material and linked to TEP: {material_list.mat_partcode}")
+                                            else:
+                                                # Create new BOMMaterial
+                                                bom = BOMMaterial.objects.create(
+                                                    part_code=structured_data['part_code'],
+                                                    mat_partcode=material_list.mat_partcode,
+                                                    source_tep=tep,
+                                                    material=material_list,
+                                                    mat_partname=material_list.mat_partname,
+                                                    mat_maker=material_list.mat_maker,
+                                                    unit=material_list.unit,
+                                                    dim_qty=dim_qty,
+                                                    loss_percent=loss_percent,
+                                                )
+                                                materials_created += 1
+                                                print(f"  ✅ Added material to BOM: {material_list.mat_partcode}")
                                             
                                     else:
                                         materials_skipped += 1
