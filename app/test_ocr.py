@@ -7,14 +7,14 @@ os.environ['PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK'] = 'True'
 
 print("Initializing PaddleOCR...")
 print("This will download models on first run (40-50MB)...")
-ocr = PaddleOCR(lang='en', use_angle_cls=True, show_log=False)
+ocr = PaddleOCR(lang='en')
 
 print("Downloading test image...")
 url = "https://paddleocr.bj.bcebos.com/dygraph_v2.1/ppocr_img/imgs_en/img_12.jpg"
 urllib.request.urlretrieve(url, "test.jpg")
 
 print("Running OCR on test image...")
-result = ocr.ocr('test.jpg', cls=True)
+result = ocr.ocr('test.jpg')
 
 if result and result[0]:
     print("\n📝 Extracted Text:")
