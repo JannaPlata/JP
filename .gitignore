@@ -23,3 +23,5 @@ customer_pdfs/
 # OS files
 .DS_Store
 Thumbs.db
+
+doc/
